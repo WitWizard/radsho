@@ -1,0 +1,9 @@
+node_modules
+dist
+dist-installers
+target
+.keys
+src-tauri/gen
+src-tauri/tauri.updater.conf.json
+src-tauri/Cargo.lock.bak
+*.log

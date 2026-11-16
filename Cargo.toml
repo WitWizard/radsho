@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["src-tauri"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.77"
+authors = ["WitWizard (Lilmmd & LFnighTT)"]
+license = "MIT"
+homepage = "https://witwizard.dev/radsho"
+repository = "https://github.com/WitWizard/radsho"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true

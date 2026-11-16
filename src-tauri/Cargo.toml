@@ -1,0 +1,58 @@
+[package]
+name = "radsho"
+version.workspace = true
+description = "Radsho (ردشو) - censorship-resistant VPN and smart sanction-bypass client by WitWizard"
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "radsho_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "process", "sync", "fs"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures-util = "0.3"
+sha2 = "0.10"
+hex = "0.4"
+anyhow = "1"
+thiserror = "2"
+rand = "0.9"
+tracing = "0.1"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_Networking_WinInet",
+] }
+
+[package.metadata.winres]
+CompanyName = "WitWizard"
+LegalCopyright = "Copyright (c) WitWizard - Lilmmd & LFnighTT"
+FileDescription = "Radsho (ردشو) VPN by WitWizard"
+ProductName = "Radsho"
+OriginalFilename = "radsho.exe"
