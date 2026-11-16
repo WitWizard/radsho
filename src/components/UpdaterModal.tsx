@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BadgeCheck, Download, Loader2, RotateCw } from "lucide-react";
 import { useApp } from "../state/AppContext";
 import { APP_VERSION, CORE_VERSION } from "../lib/config";
@@ -12,6 +12,12 @@ export function UpdaterBody() {
   const [phase, setPhase] = useState<Phase>(updateInfo ? "ready" : "idle");
   const [progress, setProgress] = useState(0);
 
+  useEffect(() => {
+    if (updateInfo && phase === "idle") {
+      setPhase("ready");
+    }
+  }, [updateInfo, phase]);
+
   const check = async () => {
     setPhase("checking");
     const info = await checkForUpdates();
@@ -21,12 +27,19 @@ export function UpdaterBody() {
   const download = async () => {
     setPhase("downloading");
     setProgress(0);
-    await call<void>("updater_download", {}, async () => {
-      for (let value = 0; value <= 100; value += 4) {
-        setProgress(value);
-        await sleep(70);
-      }
-    });
+    const ticker = window.setInterval(() => {
+      setProgress((prev) => (prev < 92 ? prev + 4 : prev));
+    }, 90);
+    try {
+      await call<void>("updater_download", {}, async () => {
+        for (let value = 0; value <= 100; value += 4) {
+          setProgress(value);
+          await sleep(70);
+        }
+      });
+    } finally {
+      window.clearInterval(ticker);
+    }
     setProgress(100);
     setPhase("verifying");
     await sleep(1200);

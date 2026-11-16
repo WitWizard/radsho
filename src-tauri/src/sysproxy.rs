@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
@@ -19,13 +20,16 @@ pub struct ProxyLock {
     pub applied_port: u16,
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub trait TunBridge: Send + Sync {
     fn start(&self, ports: EffectivePorts, routing: &RoutingSettings, dns: &str) -> Result<()>;
     fn stop(&self) -> Result<()>;
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
 static BRIDGE: OnceLock<Box<dyn TunBridge>> = OnceLock::new();
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub fn install_bridge(bridge: Box<dyn TunBridge>) {
     let _ = BRIDGE.set(bridge);
 }
@@ -211,18 +215,21 @@ mod platform {
     }
 }
 
-const IS_MOBILE: bool = cfg!(any(target_os = "android", target_os = "ios"));
-
 pub fn recover_if_needed(dir: &Path) -> bool {
-    if IS_MOBILE {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = dir;
         return false;
     }
-    let Some(lock) = read_lock(dir) else { return false };
-    let restored = platform::restore(&lock).is_ok();
-    if restored {
-        remove_lock(dir);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let Some(lock) = read_lock(dir) else { return false };
+        let restored = platform::restore(&lock).is_ok();
+        if restored {
+            remove_lock(dir);
+        }
+        restored
     }
-    restored
 }
 
 #[derive(Clone, Debug)]
@@ -236,32 +243,41 @@ impl SystemProxy {
     }
 
     pub fn enable(&self, ports: EffectivePorts, routing: &RoutingSettings, dns: &str) -> Result<()> {
-        if IS_MOBILE {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
             if let Some(bridge) = BRIDGE.get() {
                 return bridge.start(ports, routing, dns);
             }
             return Ok(());
         }
-        let mut lock = read_lock(&self.dir).unwrap_or_default();
-        if lock.applied_port == 0 {
-            platform::capture(&mut lock)?;
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            let _ = (routing, dns);
+            let mut lock = read_lock(&self.dir).unwrap_or_default();
+            if lock.applied_port == 0 {
+                platform::capture(&mut lock)?;
+            }
+            lock.applied_port = ports.http;
+            write_lock_atomic(&self.dir, &lock)?;
+            platform::apply(ports.http, &lock)
         }
-        lock.applied_port = ports.http;
-        write_lock_atomic(&self.dir, &lock)?;
-        platform::apply(ports.http, &lock)
     }
 
     pub fn disable(&self) -> Result<()> {
-        if IS_MOBILE {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
             if let Some(bridge) = BRIDGE.get() {
                 return bridge.stop();
             }
             return Ok(());
         }
-        let Some(lock) = read_lock(&self.dir) else { return Ok(()) };
-        platform::restore(&lock)?;
-        remove_lock(&self.dir);
-        Ok(())
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            let Some(lock) = read_lock(&self.dir) else { return Ok(()) };
+            platform::restore(&lock)?;
+            remove_lock(&self.dir);
+            Ok(())
+        }
     }
 }
 
@@ -272,7 +288,9 @@ pub mod mobile {
     use tauri::Runtime;
     use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
 
-    use super::{TunBridge, install_bridge};
+    use super::{
+        ProxyLock, TunBridge, install_bridge, platform, read_lock, remove_lock, write_lock_atomic,
+    };
     use crate::config::{EffectivePorts, RoutingSettings};
 
     #[cfg(target_os = "android")]
@@ -319,6 +337,14 @@ pub mod mobile {
     }
 
     pub fn plugin<R: Runtime>() -> TauriPlugin<R> {
+        let _ = (
+            read_lock as fn(&std::path::Path) -> Option<ProxyLock>,
+            write_lock_atomic as fn(&std::path::Path, &ProxyLock) -> Result<()>,
+            remove_lock as fn(&std::path::Path),
+            platform::capture as fn(&mut ProxyLock) -> Result<()>,
+            platform::apply as fn(u16, &ProxyLock) -> Result<()>,
+            platform::restore as fn(&ProxyLock) -> Result<()>,
+        );
         Builder::new("radsho-vpn")
             .setup(|_app, api| {
                 #[cfg(target_os = "android")]

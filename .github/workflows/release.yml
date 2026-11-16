@@ -6,6 +6,11 @@ on:
       - "v*"
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  NODE_OPTIONS: "--no-deprecation"
+  CARGO_TERM_COLOR: always
+
 jobs:
   build-desktop:
     strategy:
@@ -27,9 +32,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux Dependencies
         if: matrix.os == 'ubuntu-22.04'
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            libssl-dev \
+            libfuse2 \
+            file \
+            build-essential \
+            curl \
+            wget
       - name: Build Desktop Artifacts
         run: ${{ matrix.script }}
       - name: Upload Desktop Installers
@@ -49,15 +67,28 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
-      - name: Install NDK
-        run: sdkmanager --install "ndk;27.0.12077973"
+      - name: Setup Android SDK & NDK
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_HOME="$SDK_ROOT"
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT" -name sdkmanager -type f | head -n 1)"
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+          NDK_PATH="$SDK_ROOT/ndk/27.0.12077973"
+          echo "NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
       - name: Build Android APK & AAB
-        env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
         run: bash ./scripts/build-all.sh android
       - name: Upload Android Artifacts
         uses: actions/upload-artifact@v4

@@ -3,9 +3,11 @@ package dev.witwizard.radsho.vpn
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import androidx.annotation.Keep
 import hev.htproxy.TProxyService
 import java.io.File
 
+@Keep
 class RadshoVpnService : VpnService() {
     companion object {
         const val ACTION_START = "dev.witwizard.radsho.vpn.START"
@@ -78,13 +80,15 @@ class RadshoVpnService : VpnService() {
               log-level: warn
             """.trimIndent()
         )
-        TProxyService.TProxyStartService(config.absolutePath, descriptor.fd)
+        runCatching {
+            TProxyService.TProxyStartService(config.absolutePath, descriptor.fd)
+        }
     }
 
     private fun stopTunnel() {
         if (tunnel != null) {
-            TProxyService.TProxyStopService()
-            tunnel?.close()
+            runCatching { TProxyService.TProxyStopService() }
+            runCatching { tunnel?.close() }
             tunnel = null
         }
     }

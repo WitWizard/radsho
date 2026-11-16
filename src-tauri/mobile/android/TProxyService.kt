@@ -1,13 +1,20 @@
 package hev.htproxy
 
+import androidx.annotation.Keep
+
+@Keep
 object TProxyService {
     init {
-        System.loadLibrary("hev-socks5-tunnel")
+        runCatching {
+            System.loadLibrary("hev-socks5-tunnel")
+        }
     }
 
+    @Keep
     @JvmStatic
     external fun TProxyStartService(configPath: String, fd: Int)
 
+    @Keep
     @JvmStatic
     external fun TProxyStopService()
 }

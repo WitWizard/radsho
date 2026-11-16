@@ -100,10 +100,15 @@ function Ensure-Core {
             Copy-Item -Path (Join-Path $stage "pt\*") -Destination $tauriCorePt -Recurse -Force
         }
     }
+
+    $existingFiles = Get-ChildItem -Path $tauriCore -File -Recurse -ErrorAction SilentlyContinue
+    if (-not $existingFiles) {
+        New-Item -ItemType File -Force -Path (Join-Path $tauriCore ".keep") | Out-Null
+    }
 }
 
 if (-not (Test-Path "node_modules")) {
-    Invoke-Checked { npm install }
+    Invoke-Checked { npm install --no-audit --no-fund }
 }
 
 Ensure-Icon
@@ -111,18 +116,20 @@ Ensure-Core
 
 $keyDir = Join-Path $root ".keys"
 $keyPath = Join-Path $keyDir "radsho-updater.key"
-$keyPass = "radsho"
 New-Item -ItemType Directory -Force -Path $keyDir | Out-Null
 
 if ($env:RADSHO_UPDATER_PUBKEY -and $env:TAURI_SIGNING_PRIVATE_KEY) {
     $publicKey = $env:RADSHO_UPDATER_PUBKEY
+    if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+    }
 } else {
     if (-not (Test-Path $keyPath)) {
-        Invoke-Checked { npx tauri signer generate --ci --force -p $keyPass -w $keyPath }
+        Invoke-Checked { npx tauri signer generate --ci --force -w $keyPath }
     }
     $publicKey = (Get-Content "$keyPath.pub" -Raw).Trim()
     $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $keyPath -Raw).Trim()
-    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $keyPass
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 }
 
 $overlay = Join-Path $root "src-tauri\tauri.updater.conf.json"
@@ -143,28 +150,26 @@ foreach ($target in $Targets) {
     }
 }
 
-if ($IncludeAndroid -or $env:ANDROID_HOME) {
-    if ($env:ANDROID_HOME) {
-        rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-        if (-not (Test-Path "src-tauri\gen\android")) {
-            Invoke-Checked { npx tauri android init }
-        }
-        $javaDir = "src-tauri\gen\android\app\src\main\java"
-        New-Item -ItemType Directory -Force -Path "$javaDir\dev\witwizard\radsho\vpn", "$javaDir\hev\htproxy" | Out-Null
-        Copy-Item "src-tauri\mobile\android\RadshoVpnPlugin.kt" "$javaDir\dev\witwizard\radsho\vpn\" -Force
-        Copy-Item "src-tauri\mobile\android\RadshoVpnService.kt" "$javaDir\dev\witwizard\radsho\vpn\" -Force
-        Copy-Item "src-tauri\mobile\android\TProxyService.kt" "$javaDir\hev\htproxy\" -Force
-        $manifestPath = "src-tauri\gen\android\app\src\main\AndroidManifest.xml"
-        $snippet = Get-Content "src-tauri\mobile\android\service-manifest.xml" -Raw
-        $manifestText = Get-Content $manifestPath -Raw
-        if ($manifestText -notmatch "RadshoVpnService") {
-            $manifestText = $manifestText.Replace("</application>", "$snippet`n    </application>")
-            [System.IO.File]::WriteAllText($manifestPath, $manifestText, (New-Object System.Text.UTF8Encoding($false)))
-        }
-        Invoke-Checked { npx tauri android build --apk --aab --config $overlay }
-        Get-ChildItem -Path "src-tauri\gen\android" -Recurse -Include "*.apk", "*.aab" | Where-Object { $_.FullName -match "release" } | ForEach-Object {
-            Copy-Item $_.FullName -Destination $artifacts -Force
-        }
+if ($IncludeAndroid -and $env:ANDROID_HOME) {
+    rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+    if (-not (Test-Path "src-tauri\gen\android")) {
+        Invoke-Checked { npx tauri android init --ci }
+    }
+    $javaDir = "src-tauri\gen\android\app\src\main\java"
+    New-Item -ItemType Directory -Force -Path "$javaDir\dev\witwizard\radsho\vpn", "$javaDir\hev\htproxy" | Out-Null
+    Copy-Item "src-tauri\mobile\android\RadshoVpnPlugin.kt" "$javaDir\dev\witwizard\radsho\vpn\" -Force
+    Copy-Item "src-tauri\mobile\android\RadshoVpnService.kt" "$javaDir\dev\witwizard\radsho\vpn\" -Force
+    Copy-Item "src-tauri\mobile\android\TProxyService.kt" "$javaDir\hev\htproxy\" -Force
+    $manifestPath = "src-tauri\gen\android\app\src\main\AndroidManifest.xml"
+    $snippet = Get-Content "src-tauri\mobile\android\service-manifest.xml" -Raw
+    $manifestText = Get-Content $manifestPath -Raw
+    if ($manifestText -notmatch "RadshoVpnService") {
+        $manifestText = $manifestText.Replace("</application>", "$snippet`n    </application>")
+        [System.IO.File]::WriteAllText($manifestPath, $manifestText, (New-Object System.Text.UTF8Encoding($false)))
+    }
+    Invoke-Checked { npx tauri android build --apk --aab --config $overlay }
+    Get-ChildItem -Path "src-tauri\gen\android" -Recurse -Include "*.apk", "*.aab" | Where-Object { $_.FullName -match "release" } | ForEach-Object {
+        Copy-Item $_.FullName -Destination$artifacts -Force
     }
 }
 

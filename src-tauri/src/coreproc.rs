@@ -161,6 +161,7 @@ pub fn parse_stats_line(line: &str) -> Option<(u64, u64)> {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 fn classify(line: &str) -> LogLevel {
     let lowered = line.to_ascii_lowercase();
     if lowered.contains("error") || lowered.contains("fatal") || lowered.contains("panic") {
@@ -174,6 +175,7 @@ fn classify(line: &str) -> LogLevel {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 fn pump<R>(reader: R, tracker: Arc<Mutex<Tracker>>, sink: LogSink)
 where
     R: AsyncRead + Unpin + Send + 'static,

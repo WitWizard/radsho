@@ -9,9 +9,10 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+#[cfg(desktop)]
+use tauri::{PhysicalPosition, Position, WindowEvent};
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, Position, RunEvent, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-    WindowEvent,
+    AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -21,6 +22,7 @@ use coreproc::LogLevel;
 use session::{ConnState, LogLine, Session, Snapshot};
 use updater::{UpdaterState, core_binary_path};
 
+#[cfg(desktop)]
 const TRAY_ID: &str = "radsho-tray";
 
 #[derive(Clone, Debug, Serialize)]
@@ -102,6 +104,8 @@ fn tray_open_main(app: AppHandle) {
         }
         show_main_window(&app);
     }
+    #[cfg(not(desktop))]
+    let _ = app;
 }
 
 #[tauri::command]
@@ -446,7 +450,10 @@ pub fn run() {
                 Lang::En => "Radsho",
             };
             let session = Session::new(app.handle().clone(), dir, settings);
-            session.log(LogLevel::Info, format!("Radsho {} - WitWizard - Lilmmd & LFnighTT", config::APP_VERSION));
+            session.log(
+                LogLevel::Info,
+                format!("Radsho {} - WitWizard - {}", config::APP_VERSION, config::CREATORS.join(" & ")),
+            );
             if recovered {
                 session.log(LogLevel::Warn, "stale system proxy restored from proxy.lock before window start");
             }

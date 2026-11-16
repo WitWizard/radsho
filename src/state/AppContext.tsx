@@ -97,7 +97,7 @@ function simulatedUpdate(): UpdateInfo {
     appCurrent: APP_VERSION,
     appLatest: "1.1.0",
     coreCurrent: CORE_VERSION,
-    coreLatest: "0.9.6",
+    coreLatest: "2.5.0",
     changelog: [
       "Faster Psiphon carrier handshake inside WARP",
       "Shuffle Location rotates exit region without dropping the carrier",

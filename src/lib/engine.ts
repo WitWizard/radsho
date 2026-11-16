@@ -20,8 +20,8 @@ export function initialSnapshot(): SessionSnapshot {
   return {
     state: "OFF",
     gen: 0,
-    serverId: "firenze",
-    region: "IT",
+    serverId: "frankfurt",
+    region: "DE",
     transport: null,
     egress: null,
     uptimeSecs: 0,
@@ -243,6 +243,7 @@ class NativeEngine implements Engine {
     this.subscribers.add(subscriber);
     onSnapshot(this.snap);
     if (this.timer === null) {
+      void this.poll();
       this.timer = window.setInterval(() => void this.poll(), 1000);
     }
     return () => {

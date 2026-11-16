@@ -6,6 +6,7 @@ import android.net.VpnService
 import android.system.Os
 import android.webkit.WebView
 import androidx.activity.result.ActivityResult
+import androidx.annotation.Keep
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -13,6 +14,7 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.Plugin
 
+@Keep
 @InvokeArg
 class StartArgs {
     var socksPort: Int = 1821
@@ -23,10 +25,13 @@ class StartArgs {
     var direct: Array<String> = emptyArray()
 }
 
+@Keep
 @TauriPlugin
 class RadshoVpnPlugin(private val activity: Activity) : Plugin(activity) {
     override fun load(webView: WebView) {
-        Os.setenv("RADSHO_NATIVE_LIB_DIR", activity.applicationInfo.nativeLibraryDir, true)
+        runCatching {
+            Os.setenv("RADSHO_NATIVE_LIB_DIR", activity.applicationInfo.nativeLibraryDir, true)
+        }
     }
 
     @Command

@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Radsho main window capability",
-  "windows": ["main"],
+  "description": "Radsho main and tray window capability",
+  "windows": ["main", "tray_menu"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

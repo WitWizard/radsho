@@ -173,12 +173,15 @@ impl Default for Settings {
             minimize_to_tray: true,
             auto_update: true,
             psiphon: true,
-            psiphon_region: "IT".to_string(),
+            psiphon_region: "DE".to_string(),
             sanction_check: true,
             shuffle: ShuffleSettings {
                 enabled: false,
                 interval_min: 10,
-                regions: ["DE", "NL", "FR", "AT", "IT", "ES"].iter().map(|region| region.to_string()).collect(),
+                regions: ["DE", "NL", "FR", "AT", "IT", "ES", "CH", "SE", "GB", "US"]
+                    .iter()
+                    .map(|region| region.to_string())
+                    .collect(),
             },
             routing: RoutingSettings {
                 enabled: true,
@@ -194,7 +197,7 @@ impl Default for Settings {
                 fragment: false,
             },
             remembered_transport: None,
-            server_id: "firenze".to_string(),
+            server_id: "frankfurt".to_string(),
         }
     }
 }
@@ -349,11 +352,11 @@ mod tests {
     fn psiphon_mode_never_passes_exit_loc() {
         let settings = Settings::default();
         for transport in settings.build_chain() {
-            let args = settings.build_core_args(transport, "IT");
+            let args = settings.build_core_args(transport, "DE");
             assert!(!args.iter().any(|arg| arg == "--exit-loc"));
             assert!(args.iter().any(|arg| arg == "--psiphon"));
             assert!(args.iter().any(|arg| arg == "--config"));
-            assert!(args.windows(2).any(|pair| pair[0] == "--psiphon-region" && pair[1] == "IT"));
+            assert!(args.windows(2).any(|pair| pair[0] == "--psiphon-region" && pair[1] == "DE"));
             assert!(args.windows(2).any(|pair| pair[0] == "--scan" && pair[1] == "verified"));
         }
     }
@@ -364,7 +367,7 @@ mod tests {
         settings.psiphon = false;
         let chain = settings.build_chain();
         assert!(chain[0].is_nested());
-        let args = settings.build_core_args(chain[0], "IT");
+        let args = settings.build_core_args(chain[0], "DE");
         assert!(args.windows(2).any(|pair| pair[0] == "--exit-loc" && pair[1] == "!IR"));
         assert!(!args.iter().any(|arg| arg == "--psiphon"));
     }
