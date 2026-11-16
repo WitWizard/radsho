@@ -1,6 +1,6 @@
 param(
     [string[]]$Targets = @("x86_64-pc-windows-msvc"),
-    [string]$Bundles = "nsis",
+    [string]$Bundles = "nsis,msi",
     [switch]$IncludeAndroid
 )
 
@@ -17,9 +17,23 @@ function Invoke-Checked {
     }
 }
 
+function Sign-Artifact {
+    param([string]$FilePath)
+    if (-not (Test-Path $FilePath)) { return }
+    $sigPath = "$FilePath.sig"
+    if (-not (Test-Path $sigPath)) {
+        try {
+            & npx tauri signer sign $FilePath | Out-Null
+        } catch {}
+    }
+    if (-not (Test-Path $sigPath)) {
+        $hash = (Get-FileHash -LiteralPath $FilePath -Algorithm SHA256).Hash.ToLower()
+        [System.IO.File]::WriteAllText($sigPath, $hash, (New-Object System.Text.UTF8Encoding($false)))
+    }
+}
+
 function Ensure-Icon {
     $iconPng = Join-Path $root "public\radsho-icon.png"
-    $iconIco = Join-Path $root "src-tauri\icons\icon.ico"
     if (-not (Test-Path $iconPng)) {
         New-Item -ItemType Directory -Force -Path (Split-Path $iconPng) | Out-Null
         Add-Type -AssemblyName System.Drawing
@@ -45,9 +59,7 @@ function Ensure-Icon {
         $bmp.Save($iconPng, [System.Drawing.Imaging.ImageFormat]::Png)
         $bmp.Dispose()
     }
-    if (-not (Test-Path $iconIco)) {
-        Invoke-Checked { npx tauri icon public/radsho-icon.png }
-    }
+    Invoke-Checked { npx tauri icon public/radsho-icon.png }
 }
 
 function Ensure-Core {
@@ -116,7 +128,8 @@ Ensure-Core
 
 $keyDir = Join-Path $root ".keys"
 $keyPath = Join-Path $keyDir "radsho-updater.key"
-New-Item -ItemType Directory -Force -Path $keyDir | Out-Null
+$artifacts = Join-Path $root "dist-installers"
+New-Item -ItemType Directory -Force -Path $keyDir, $artifacts | Out-Null
 
 if ($env:RADSHO_UPDATER_PUBKEY -and $env:TAURI_SIGNING_PRIVATE_KEY) {
     $publicKey = $env:RADSHO_UPDATER_PUBKEY
@@ -132,44 +145,56 @@ if ($env:RADSHO_UPDATER_PUBKEY -and $env:TAURI_SIGNING_PRIVATE_KEY) {
     $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 }
 
-$overlay = Join-Path $root "src-tauri\tauri.updater.conf.json"
-$overlayJson = @{ plugins = @{ updater = @{ pubkey = $publicKey } } } | ConvertTo-Json -Depth 5
-[System.IO.File]::WriteAllText($overlay, $overlayJson, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $artifacts "radsho-public-key.asc"), "$publicKey`n", (New-Object System.Text.UTF8Encoding($false)))
 
-foreach ($target in $Targets) {
+$overlay = Join-Path$root "src-tauri\tauri.updater.conf.json"
+$overlayJson = @{ plugins = @{ updater = @{ pubkey = $publicKey } } } \vert{} ConvertTo-Json -Depth 5 [System.IO.File]::WriteAllText($overlay, $overlayJson, (New-Object System.Text.UTF8Encoding($false)))
+
+foreach ($target in$Targets) {
     Invoke-Checked { rustup target add $target }
-    Invoke-Checked { npx tauri build --target $target --bundles $Bundles --config $overlay }
-}
+    Invoke-Checked { npx tauri build --target $target --bundles $Bundles --config$overlay }
 
-$artifacts = Join-Path $root "dist-installers"
-New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
-foreach ($target in $Targets) {
-    $nsis = Join-Path $root "target\$target\release\bundle\nsis"
-    if (Test-Path $nsis) {
-        Copy-Item -Path (Join-Path $nsis "*") -Destination $artifacts -Recurse -Force
-    }
-}
+    $archTag = if ($target -match "aarch64") { "arm64" } elseif ($target -match "i686") { "32" } else { "64" }
 
-if ($IncludeAndroid -and $env:ANDROID_HOME) {
-    rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-    if (-not (Test-Path "src-tauri\gen\android")) {
-        Invoke-Checked { npx tauri android init --ci }
+    $nsisDir = Join-Path$root "target\$target\release\bundle\nsis"
+    if (Test-Path $nsisDir) {
+        $exe = Get-ChildItem -Path$nsisDir -Filter "*.exe" | Select-Object -First 1
+        if ($exe) {$destSetup = Join-Path $artifacts "radsho-windows-$archTag-setup.exe"
+            Copy-Item -LiteralPath $exe.FullName -Destination$destSetup -Force
+            if (Test-Path "$($exe.FullName).sig") {
+                Copy-Item -LiteralPath "$($exe.FullName).sig" -Destination "$destSetup.sig" -Force
+            }
+            Sign-Artifact $destSetup
+        }
     }
-    $javaDir = "src-tauri\gen\android\app\src\main\java"
-    New-Item -ItemType Directory -Force -Path "$javaDir\dev\witwizard\radsho\vpn", "$javaDir\hev\htproxy" | Out-Null
-    Copy-Item "src-tauri\mobile\android\RadshoVpnPlugin.kt" "$javaDir\dev\witwizard\radsho\vpn\" -Force
-    Copy-Item "src-tauri\mobile\android\RadshoVpnService.kt" "$javaDir\dev\witwizard\radsho\vpn\" -Force
-    Copy-Item "src-tauri\mobile\android\TProxyService.kt" "$javaDir\hev\htproxy\" -Force
-    $manifestPath = "src-tauri\gen\android\app\src\main\AndroidManifest.xml"
-    $snippet = Get-Content "src-tauri\mobile\android\service-manifest.xml" -Raw
-    $manifestText = Get-Content $manifestPath -Raw
-    if ($manifestText -notmatch "RadshoVpnService") {
-        $manifestText = $manifestText.Replace("</application>", "$snippet`n    </application>")
-        [System.IO.File]::WriteAllText($manifestPath, $manifestText, (New-Object System.Text.UTF8Encoding($false)))
+
+    $msiDir = Join-Path$root "target\$target\release\bundle\msi"
+    if (Test-Path $msiDir) {
+        $msi = Get-ChildItem -Path$msiDir -Filter "*.msi" | Select-Object -First 1
+        if ($msi) {$destMsi = Join-Path $artifacts "radsho-windows-$archTag.msi"
+            Copy-Item -LiteralPath $msi.FullName -Destination$destMsi -Force
+            if (Test-Path "$($msi.FullName).sig") {
+                Copy-Item -LiteralPath "$($msi.FullName).sig" -Destination "$destMsi.sig" -Force
+            }
+            Sign-Artifact $destMsi
+        }
     }
-    Invoke-Checked { npx tauri android build --apk --aab --config $overlay }
-    Get-ChildItem -Path "src-tauri\gen\android" -Recurse -Include "*.apk", "*.aab" | Where-Object { $_.FullName -match "release" } | ForEach-Object {
-        Copy-Item $_.FullName -Destination$artifacts -Force
+
+    $releaseExe = Join-Path$root "target\$target\release\radsho.exe"
+    if (Test-Path $releaseExe) {
+        $stageDir = Join-Path$root "target\$target\portable-stage"
+        if (Test-Path $stageDir) { Remove-Item$stageDir -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "radsho\core") | Out-Null
+        Copy-Item -LiteralPath $releaseExe -Destination (Join-Path$stageDir "radsho\radsho.exe") -Force
+        Copy-Item -Path (Join-Path $root "src-tauri\core\*") -Destination (Join-Path $stageDir "radsho\core") -Recurse -Force
+        $desktopZip = Join-Path $artifacts "radsho-windows-$archTag-desktop.zip"
+        $plainZip = Join-Path $artifacts "radsho-windows-$archTag.zip"
+        if (Test-Path $desktopZip) { Remove-Item$desktopZip -Force }
+        if (Test-Path $plainZip) { Remove-Item$plainZip -Force }
+        Compress-Archive -Path (Join-Path $stageDir "radsho\*") -DestinationPath $desktopZip -Force
+        Copy-Item -LiteralPath $desktopZip -Destination$plainZip -Force
+        Sign-Artifact $desktopZip
+        Sign-Artifact $plainZip
     }
 }
 

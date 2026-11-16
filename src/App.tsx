@@ -188,7 +188,12 @@ function Shell() {
 
   if (isMobile) {
     return (
-      <div className="relative h-full overflow-hidden bg-bg" style={{ paddingTop: "env(safe-area-inset-top)" }}>
+      <div
+        className="relative h-full overflow-hidden bg-bg"
+        style={{
+          paddingTop: "max(env(safe-area-inset-top, 0px), var(--android-inset-top, 0px))",
+        }}
+      >
         <AnimatedView />
         {view !== "locations" && <MobileNav />}
       </div>

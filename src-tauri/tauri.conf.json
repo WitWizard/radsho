@@ -36,8 +36,13 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "iconPath": "icons/icon.ico",
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
       "nsis": {
         "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
         "displayLanguageSelector": true,
         "languages": ["English", "Farsi"],
         "compression": "lzma"

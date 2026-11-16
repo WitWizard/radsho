@@ -27,7 +27,12 @@ export function DashboardView() {
   }
 
   return (
-    <div className="scroll-y h-full pb-36">
+    <div
+      className="scroll-y h-full"
+      style={{
+        paddingBottom: "calc(max(env(safe-area-inset-bottom, 0px), var(--android-inset-bottom, 12px)) + 112px)",
+      }}
+    >
       <section className="surface-dark rounded-b-[40px] bg-hero px-5 pb-5 pt-5 text-fg">
         <div className="mb-6 flex items-center justify-between">
           <button

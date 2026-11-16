@@ -118,12 +118,43 @@ pub fn core_dir(dir: &Path) -> PathBuf {
     dir.join("bin")
 }
 
+#[cfg(target_os = "android")]
+fn discover_android_native_lib_dir() -> Option<PathBuf> {
+    if let Ok(env_dir) = std::env::var("RADSHO_NATIVE_LIB_DIR") {
+        let trimmed = env_dir.trim();
+        if !trimmed.is_empty() {
+            let candidate = PathBuf::from(trimmed);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Ok(maps) = fs::read_to_string("/proc/self/maps") {
+        for line in maps.lines() {
+            if line.contains("libradsho_lib.so") {
+                if let Some(pos) = line.find('/') {
+                    let full_path = PathBuf::from(line[pos..].trim());
+                    if let Some(parent) = full_path.parent() {
+                        return Some(parent.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn core_binary_path(dir: &Path) -> PathBuf {
     #[cfg(target_os = "android")]
     {
-        let _ = dir;
-        let native = std::env::var("RADSHO_NATIVE_LIB_DIR").unwrap_or_default();
-        return PathBuf::from(native).join("libaether.so");
+        if let Some(native_dir) = discover_android_native_lib_dir() {
+            let so_path = native_dir.join("libaether.so");
+            if so_path.exists() {
+                return so_path;
+            }
+            return so_path;
+        }
+        return core_dir(dir).join("libaether.so");
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -172,7 +203,7 @@ pub fn installed_core_version(dir: &Path) -> String {
     if let Ok(raw) = fs::read_to_string(core_dir(dir).join("aether.version")) {
         return raw.trim().to_string();
     }
-    if core_binary_path(dir).exists() {
+    if core_binary_path(dir).exists() || cfg!(any(target_os = "android", target_os = "ios")) {
         return "2.4.0".to_string();
     }
     "0.0.0".to_string()

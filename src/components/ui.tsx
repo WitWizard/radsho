@@ -218,6 +218,13 @@ export function Modal({ open, title, onClose, children, footer, wide = false }: 
               "surface-dark flex max-h-[88vh] flex-col border border-white/10 bg-hero text-fg shadow-2xl",
               isMobile ? "w-full rounded-t-[32px]" : cn("w-full rounded-[28px]", wide ? "max-w-2xl" : "max-w-lg"),
             )}
+            style={
+              isMobile
+                ? {
+                    paddingBottom: "max(env(safe-area-inset-bottom, 0px), var(--android-inset-bottom, 12px))",
+                  }
+                : undefined
+            }
             initial={isMobile ? { y: "100%" } : { opacity: 0, scale: 0.96, y: 12 }}
             animate={isMobile ? { y: 0 } : { opacity: 1, scale: 1, y: 0 }}
             exit={isMobile ? { y: "100%" } : { opacity: 0, scale: 0.96 }}
@@ -273,9 +280,18 @@ export function Button({ children, onClick, variant = "mint", disabled = false, 
 }
 
 export function Toast() {
-  const { toast } = useApp();
+  const { toast, isMobile } = useApp();
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-28 z-[60] flex justify-center md:bottom-10">
+    <div
+      className="pointer-events-none fixed inset-x-0 z-[60] flex justify-center md:bottom-10"
+      style={
+        isMobile
+          ? {
+              bottom: "calc(max(env(safe-area-inset-bottom, 0px), var(--android-inset-bottom, 12px)) + 98px)",
+            }
+          : undefined
+      }
+    >
       <AnimatePresence>
         {toast && (
           <motion.div

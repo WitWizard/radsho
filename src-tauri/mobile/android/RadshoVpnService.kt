@@ -23,6 +23,7 @@ class RadshoVpnService : VpnService() {
             "Spotify" to "com.spotify.music",
             "Steam" to "com.valvesoftware.android.steam.community",
             "WhatsApp" to "com.whatsapp",
+            "Discord" to "com.discord",
         )
     }
 
@@ -56,7 +57,10 @@ class RadshoVpnService : VpnService() {
             .setMtu(8500)
             .addAddress("198.18.0.1", 32)
             .addRoute("0.0.0.0", 0)
-            .addDnsServer(args.dns)
+        val dnsIp = args.dns.trim().ifEmpty { "1.1.1.1" }
+        runCatching { builder.addDnsServer(dnsIp) }.onFailure {
+            runCatching { builder.addDnsServer("1.1.1.1") }
+        }
         if (args.allowlist) {
             args.apps.mapNotNull { packageMap[it] }.forEach { name ->
                 runCatching { builder.addAllowedApplication(name) }
@@ -64,7 +68,7 @@ class RadshoVpnService : VpnService() {
         } else {
             runCatching { builder.addDisallowedApplication(packageName) }
         }
-        val descriptor = builder.establish() ?: return
+        val descriptor = runCatching { builder.establish() }.getOrNull() ?: return
         tunnel = descriptor
         val config = File(filesDir, "tproxy.yml")
         config.writeText(

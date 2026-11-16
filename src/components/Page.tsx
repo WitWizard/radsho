@@ -12,12 +12,23 @@ interface PageProps {
 export function Page({ title, children, actions, fill = false }: PageProps) {
   const { isMobile } = useApp();
   return (
-    <div className={cn("flex h-full min-h-0 flex-col", isMobile ? "px-5 pt-6" : "pe-3")}>
+    <div className={cn("flex h-full min-h-0 flex-col", isMobile ? "px-5 pt-5" : "pe-3")}>
       <div className="mb-5 flex shrink-0 items-center justify-between gap-3">
         <h1 className={cn("m-0 font-semibold tracking-tight text-fg", isMobile ? "text-[30px]" : "text-[40px]")}>{title}</h1>
         {actions && <div className="flex items-center gap-2">{actions}</div>}
       </div>
-      <div className={cn("min-h-0 flex-1", fill ? "flex flex-col" : "scroll-y", isMobile && "pb-36")}>{children}</div>
+      <div
+        className={cn("min-h-0 flex-1", fill ? "flex flex-col" : "scroll-y")}
+        style={
+          isMobile
+            ? {
+                paddingBottom: "calc(max(env(safe-area-inset-bottom, 0px), var(--android-inset-bottom, 12px)) + 108px)",
+              }
+            : undefined
+        }
+      >
+        {children}
+      </div>
     </div>
   );
 }
