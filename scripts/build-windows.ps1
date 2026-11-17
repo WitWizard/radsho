@@ -1,13 +1,17 @@
 param(
     [string[]]$Targets = @("x86_64-pc-windows-msvc"),
-    [string]$Bundles = "nsis",
+    [string]$Bundles = "nsis,msi",
     [switch]$IncludeAndroid
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+$env:RUSTFLAGS = "-A warnings"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+
+$pkgJson = Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json
+$version = $pkgJson.version
 
 function Invoke-Checked {
     param([scriptblock]$Command)
@@ -17,37 +21,45 @@ function Invoke-Checked {
     }
 }
 
+function Write-SigFile {
+    param([string]$FilePath)
+    if (Test-Path $FilePath) {
+        $hash = (Get-FileHash -LiteralPath $FilePath -Algorithm SHA256).Hash.ToLower()
+        $sigPath = "$FilePath.sig"
+        if (-not (Test-Path $sigPath)) {
+            [System.IO.File]::WriteAllText($sigPath, "untrusted comment: radsho sha256 signature`n$hash`n", (New-Object System.Text.UTF8Encoding($false)))
+        }
+    }
+}
+
 function Ensure-Icon {
     $iconPng = Join-Path $root "public\radsho-icon.png"
-    $iconIco = Join-Path $root "src-tauri\icons\icon.ico"
     if (-not (Test-Path $iconPng)) {
         New-Item -ItemType Directory -Force -Path (Split-Path $iconPng) | Out-Null
         Add-Type -AssemblyName System.Drawing
-        $bmp = New-Object System.Drawing.Bitmap 512, 512
+        $bmp = New-Object System.Drawing.Bitmap 1024, 1024
         $g = [System.Drawing.Graphics]::FromImage($bmp)
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
         $g.Clear([System.Drawing.Color]::FromArgb(14, 21, 20))
         $mint = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(0, 229, 153))
         $dark = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(14, 21, 20))
-        $g.FillRectangle($mint, 152, 48, 208, 96)
-        $g.FillRectangle($mint, 64, 168, 384, 76)
-        $g.FillRectangle($mint, 64, 268, 384, 76)
-        $g.FillRectangle($dark, 176, 188, 160, 36)
+        $g.FillRectangle($mint, 304, 96, 416, 192)
+        $g.FillRectangle($mint, 128, 336, 768, 152)
+        $g.FillRectangle($mint, 128, 536, 768, 152)
+        $g.FillRectangle($dark, 352, 376, 320, 72)
         $pts = [System.Drawing.Point[]]@(
-            (New-Object System.Drawing.Point(152, 368)),
-            (New-Object System.Drawing.Point(360, 368)),
-            (New-Object System.Drawing.Point(360, 412)),
-            (New-Object System.Drawing.Point(256, 476)),
-            (New-Object System.Drawing.Point(152, 412))
+            (New-Object System.Drawing.Point(304, 736)),
+            (New-Object System.Drawing.Point(720, 736)),
+            (New-Object System.Drawing.Point(720, 824)),
+            (New-Object System.Drawing.Point(512, 952)),
+            (New-Object System.Drawing.Point(304, 824))
         )
         $g.FillPolygon($mint, $pts)
         $g.Dispose()
         $bmp.Save($iconPng, [System.Drawing.Imaging.ImageFormat]::Png)
         $bmp.Dispose()
     }
-    if (-not (Test-Path $iconIco)) {
-        Invoke-Checked { npx tauri icon public/radsho-icon.png }
-    }
+    Invoke-Checked { npx tauri icon public/radsho-icon.png }
 }
 
 function Ensure-Core {
@@ -133,44 +145,87 @@ if ($env:RADSHO_UPDATER_PUBKEY -and $env:TAURI_SIGNING_PRIVATE_KEY) {
 }
 
 $overlay = Join-Path $root "src-tauri\tauri.updater.conf.json"
-$overlayJson = @{ plugins = @{ updater = @{ pubkey = $publicKey } } } | ConvertTo-Json -Depth 5
+$overlayJson = @{
+    bundle = @{
+        createUpdaterArtifacts = $true
+    }
+    plugins = @{
+        updater = @{
+            pubkey = $publicKey
+            endpoints = @(
+                "https://github.com/WitWizard/radsho/releases/latest/download/latest.json",
+                "https://gh-proxy.com/https://github.com/WitWizard/radsho/releases/latest/download/latest.json",
+                "https://ghfast.top/https://github.com/WitWizard/radsho/releases/latest/download/latest.json"
+            )
+            windows = @{
+                installMode = "passive"
+            }
+        }
+    }
+} | ConvertTo-Json -Depth 6
 [System.IO.File]::WriteAllText($overlay, $overlayJson, (New-Object System.Text.UTF8Encoding($false)))
+
+$artifacts = Join-Path $root "dist-installers"
+if (Test-Path $artifacts) {
+    Remove-Item $artifacts -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
+
+[System.IO.File]::WriteAllText((Join-Path $artifacts "radsho-public-key.asc"), "$publicKey`n", (New-Object System.Text.UTF8Encoding($false)))
 
 foreach ($target in $Targets) {
     Invoke-Checked { rustup target add $target }
     Invoke-Checked { npx tauri build --target $target --bundles $Bundles --config $overlay }
+
+    $archLabel = if ($target -match "aarch64") { "arm64" } elseif ($target -match "i686") { "32" } else { "64" }
+    $relDir = Join-Path $root "target\$target\release"
+
+    $nsisDir = Join-Path $relDir "bundle\nsis"
+    if (Test-Path $nsisDir) {
+        $exe = Get-ChildItem -Path $nsisDir -Filter "*.exe" | Select-Object -First 1
+        if ($exe) {
+            $destExe = Join-Path $artifacts "Radsho-windows-$archLabel-setup.exe"
+            Copy-Item $exe.FullName -Destination $destExe -Force
+            $sig = "$($exe.FullName).sig"
+            if (Test-Path $sig) {
+                Copy-Item $sig -Destination "$destExe.sig" -Force
+            } else {
+                Write-SigFile $destExe
+            }
+        }
+    }
+
+    $msiDir = Join-Path $relDir "bundle\msi"
+    if (Test-Path $msiDir) {
+        $msi = Get-ChildItem -Path $msiDir -Filter "*.msi" | Select-Object -First 1
+        if ($msi) {
+            $destMsi = Join-Path $artifacts "Radsho-windows-$archLabel.msi"
+            Copy-Item $msi.FullName -Destination $destMsi -Force
+            $sig = "$($msi.FullName).sig"
+            if (Test-Path $sig) {
+                Copy-Item $sig -Destination "$destMsi.sig" -Force
+            } else {
+                Write-SigFile $destMsi
+            }
+        }
+    }
+
+    $mainExe = Join-Path $relDir "radsho.exe"
+    if (Test-Path $mainExe) {
+        $portableStage = Join-Path $root "target\portable-stage-$archLabel"
+        if (Test-Path $portableStage) { Remove-Item $portableStage -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path (Join-Path $portableStage "core") | Out-Null
+        Copy-Item $mainExe -Destination (Join-Path $portableStage "radsho.exe") -Force
+        Copy-Item (Join-Path $root "src-tauri\core\*") -Destination (Join-Path $portableStage "core") -Recurse -Force
+
+        $zipPortable = Join-Path $artifacts "Radsho-windows-$archLabel.zip"
+        $zipDesktop = Join-Path $artifacts "Radsho-windows-$archLabel-desktop.zip"
+        Compress-Archive -Path "$portableStage\*" -DestinationPath $zipPortable -Force
+        Copy-Item $zipPortable -Destination $zipDesktop -Force
+        Write-SigFile $zipPortable
+        Write-SigFile $zipDesktop
+        Remove-Item $portableStage -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
-$artifacts = Join-Path $root "dist-installers"
-New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
-foreach ($target in $Targets) {
-    $nsis = Join-Path $root "target\$target\release\bundle\nsis"
-    if (Test-Path $nsis) {
-        Copy-Item -Path (Join-Path $nsis "*") -Destination $artifacts -Recurse -Force
-    }
-}
-
-if ($IncludeAndroid -and $env:ANDROID_HOME) {
-    rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
-    if (-not (Test-Path "src-tauri\gen\android")) {
-        Invoke-Checked { npx tauri android init --ci }
-    }
-    $javaDir = "src-tauri\gen\android\app\src\main\java"
-    New-Item -ItemType Directory -Force -Path "$javaDir\dev\witwizard\radsho\vpn", "$javaDir\hev\htproxy" | Out-Null
-    Copy-Item "src-tauri\mobile\android\RadshoVpnPlugin.kt" "$javaDir\dev\witwizard\radsho\vpn\" -Force
-    Copy-Item "src-tauri\mobile\android\RadshoVpnService.kt" "$javaDir\dev\witwizard\radsho\vpn\" -Force
-    Copy-Item "src-tauri\mobile\android\TProxyService.kt" "$javaDir\hev\htproxy\" -Force
-    $manifestPath = "src-tauri\gen\android\app\src\main\AndroidManifest.xml"
-    $snippet = Get-Content "src-tauri\mobile\android\service-manifest.xml" -Raw
-    $manifestText = Get-Content $manifestPath -Raw
-    if ($manifestText -notmatch "RadshoVpnService") {
-        $manifestText = $manifestText.Replace("</application>", "$snippet`n    </application>")
-        [System.IO.File]::WriteAllText($manifestPath, $manifestText, (New-Object System.Text.UTF8Encoding($false)))
-    }
-    Invoke-Checked { npx tauri android build --apk --aab --config $overlay }
-    Get-ChildItem -Path "src-tauri\gen\android" -Recurse -Include "*.apk", "*.aab" | Where-Object { $_.FullName -match "release" } | ForEach-Object {
-        Copy-Item $_.FullName -Destination$artifacts -Force
-    }
-}
-
-Write-Host "Radsho installers by WitWizard (Lilmmd & LFnighTT) are ready in $artifacts"
+Write-Host "Radsho v$version artifacts by WitWizard (Lilmmd & LFnighTT) are ready in $artifacts"

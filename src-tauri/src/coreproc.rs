@@ -1,13 +1,17 @@
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::time::timeout;
+use tokio::task::JoinHandle;
+use tokio::time::{sleep, timeout};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,11 +50,21 @@ impl Default for Tracker {
     }
 }
 
+enum RuntimeBackend {
+    External {
+        child: Child,
+        stdin: Option<ChildStdin>,
+        pid: Option<u32>,
+    },
+    Embedded {
+        exited: Arc<AtomicBool>,
+        tasks: Vec<JoinHandle<()>>,
+    },
+}
+
 pub struct CoreProcess {
-    child: Child,
-    stdin: Option<ChildStdin>,
+    backend: RuntimeBackend,
     tracker: Arc<Mutex<Tracker>>,
-    pid: Option<u32>,
 }
 
 #[cfg(windows)]
@@ -161,7 +175,6 @@ pub fn parse_stats_line(line: &str) -> Option<(u64, u64)> {
     }
 }
 
-#[cfg(not(target_os = "ios"))]
 fn classify(line: &str) -> LogLevel {
     let lowered = line.to_ascii_lowercase();
     if lowered.contains("error") || lowered.contains("fatal") || lowered.contains("panic") {
@@ -175,7 +188,6 @@ fn classify(line: &str) -> LogLevel {
     }
 }
 
-#[cfg(not(target_os = "ios"))]
 fn pump<R>(reader: R, tracker: Arc<Mutex<Tracker>>, sink: LogSink)
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -217,47 +229,269 @@ where
     });
 }
 
-impl CoreProcess {
-    #[cfg(not(target_os = "ios"))]
-    pub async fn spawn(binary: &Path, args: &[String], sink: LogSink) -> Result<CoreProcess> {
-        if !binary.exists() {
-            bail!("aether core binary not found at {}", binary.display());
+#[derive(Clone, Debug)]
+struct EmbeddedConfig {
+    bind: SocketAddr,
+    http: SocketAddr,
+    psiphon_bind: Option<SocketAddr>,
+    psiphon_http: Option<SocketAddr>,
+}
+
+fn parse_addr_arg(args: &[String], flag: &str, default_port: u16) -> SocketAddr {
+    for pair in args.windows(2) {
+        if pair[0] == flag {
+            if let Ok(addr) = pair[1].parse::<SocketAddr>() {
+                return addr;
+            }
         }
-        let mut command = Command::new(binary);
-        if let Some(parent) = binary.parent() {
-            command.current_dir(parent);
+    }
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), default_port)
+}
+
+fn parse_embedded_args(args: &[String]) -> EmbeddedConfig {
+    let bind = parse_addr_arg(args, "--bind", 1819);
+    let http = parse_addr_arg(args, "--http-proxy", 1820);
+    let has_psiphon = args.iter().any(|arg| arg == "--psiphon");
+    let psiphon_bind = if has_psiphon {
+        Some(parse_addr_arg(args, "--psiphon-bind", 1821))
+    } else {
+        None
+    };
+    let psiphon_http = if has_psiphon {
+        Some(parse_addr_arg(args, "--psiphon-http", 1822))
+    } else {
+        None
+    };
+    EmbeddedConfig {
+        bind,
+        http,
+        psiphon_bind,
+        psiphon_http,
+    }
+}
+
+fn add_traffic(tracker: &Arc<Mutex<Tracker>>, rx_bytes: u64, tx_bytes: u64) {
+    if let Ok(mut guard) = tracker.lock() {
+        let prev_rx = guard.stats.rx_bps;
+        let prev_tx = guard.stats.tx_bps;
+        guard.stats.rx_bps = ((prev_rx as f64 * 0.55) + (rx_bytes as f64 * 2.2)) as u64;
+        guard.stats.tx_bps = ((prev_tx as f64 * 0.55) + (tx_bytes as f64 * 2.2)) as u64;
+    }
+}
+
+async fn relay_streams(mut client: TcpStream, mut remote: TcpStream, tracker: Arc<Mutex<Tracker>>) -> Result<()> {
+    let mut first = [0u8; 2048];
+    if let Ok(Ok(n)) = timeout(Duration::from_millis(800), client.read(&mut first)).await {
+        if n > 0 {
+            if first[0] == 0x16 && n > 24 {
+                let split = 11.min(n / 2);
+                remote.write_all(&first[..split]).await?;
+                remote.flush().await?;
+                sleep(Duration::from_millis(12)).await;
+                remote.write_all(&first[split..n]).await?;
+                remote.flush().await?;
+            } else {
+                remote.write_all(&first[..n]).await?;
+                remote.flush().await?;
+            }
+            add_traffic(&tracker, 0, n as u64);
         }
-        command
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
-        #[cfg(unix)]
-        command.process_group(0);
-        let mut child = command.spawn()?;
-        #[cfg(windows)]
-        job::assign(&child)?;
-        let tracker = Arc::new(Mutex::new(Tracker::default()));
-        let pid = child.id();
-        let stdin = child.stdin.take();
-        if let Some(stdout) = child.stdout.take() {
-            pump(stdout, tracker.clone(), sink.clone());
-        }
-        if let Some(stderr) = child.stderr.take() {
-            pump(stderr, tracker.clone(), sink);
-        }
-        Ok(CoreProcess { child, stdin, tracker, pid })
+    }
+    if let Ok((up, down)) = tokio::io::copy_bidirectional(&mut client, &mut remote).await {
+        add_traffic(&tracker, down, up);
+    }
+    Ok(())
+}
+
+async fn handle_socks5_client(mut stream: TcpStream, tracker: Arc<Mutex<Tracker>>) -> Result<()> {
+    let mut header = [0u8; 2];
+    timeout(Duration::from_secs(6), stream.read_exact(&mut header)).await??;
+    if header[0] != 0x05 {
+        return Ok(());
+    }
+    let nmethods = header[1] as usize;
+    let mut methods = vec![0u8; nmethods];
+    timeout(Duration::from_secs(6), stream.read_exact(&mut methods)).await??;
+    stream.write_all(&[0x05, 0x00]).await?;
+
+    let mut req = [0u8; 4];
+    timeout(Duration::from_secs(6), stream.read_exact(&mut req)).await??;
+    if req[0] != 0x05 || req[1] != 0x01 {
+        let _ = stream.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+        return Ok(());
     }
 
-    #[cfg(target_os = "ios")]
-    pub async fn spawn(_binary: &Path, _args: &[String], _sink: LogSink) -> Result<CoreProcess> {
-        bail!("spawning child processes is not permitted on iOS; the core runs inside the packet tunnel extension")
+    let host = match req[3] {
+        0x01 => {
+            let mut ip = [0u8; 4];
+            stream.read_exact(&mut ip).await?;
+            Ipv4Addr::from(ip).to_string()
+        }
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await?;
+            let mut domain = vec![0u8; len[0] as usize];
+            stream.read_exact(&mut domain).await?;
+            String::from_utf8_lossy(&domain).to_string()
+        }
+        0x04 => {
+            let mut ip = [0u8; 16];
+            stream.read_exact(&mut ip).await?;
+            std::net::Ipv6Addr::from(ip).to_string()
+        }
+        _ => return Ok(()),
+    };
+    let mut port_buf = [0u8; 2];
+    stream.read_exact(&mut port_buf).await?;
+    let port = u16::from_be_bytes(port_buf);
+
+    let target = format!("{host}:{port}");
+    match timeout(Duration::from_secs(8), TcpStream::connect(&target)).await {
+        Ok(Ok(remote)) => {
+            remote.set_nodelay(true).ok();
+            stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]).await?;
+            relay_streams(stream, remote, tracker).await?;
+        }
+        _ => {
+            let _ = stream.write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_http_proxy_client(mut stream: TcpStream, tracker: Arc<Mutex<Tracker>>) -> Result<()> {
+    let mut buf = [0u8; 4096];
+    let n = timeout(Duration::from_secs(6), stream.read(&mut buf)).await??;
+    if n == 0 {
+        return Ok(());
+    }
+    let text = String::from_utf8_lossy(&buf[..n]);
+    let first_line = text.lines().next().unwrap_or_default();
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Ok(());
+    }
+    if parts[0].eq_ignore_ascii_case("CONNECT") {
+        let target = parts[1];
+        if let Ok(Ok(remote)) = timeout(Duration::from_secs(8), TcpStream::connect(target)).await {
+            remote.set_nodelay(true).ok();
+            stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+            relay_streams(stream, remote, tracker).await?;
+        } else {
+            let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+        }
+    }
+    Ok(())
+}
+
+async fn spawn_embedded(args: &[String], tracker: Arc<Mutex<Tracker>>, sink: LogSink) -> Result<CoreProcess> {
+    let cfg = parse_embedded_args(args);
+    let exited = Arc::new(AtomicBool::new(false));
+    let mut tasks = Vec::new();
+
+    let socks_listener = TcpListener::bind(cfg.bind).await?;
+    let t_socks = tracker.clone();
+    tasks.push(tokio::spawn(async move {
+        while let Ok((stream, _)) = socks_listener.accept().await {
+            stream.set_nodelay(true).ok();
+            let tr = t_socks.clone();
+            tokio::spawn(async move {
+                let _ = handle_socks5_client(stream, tr).await;
+            });
+        }
+    }));
+
+    let http_listener = TcpListener::bind(cfg.http).await?;
+    let t_http = tracker.clone();
+    tasks.push(tokio::spawn(async move {
+        while let Ok((stream, _)) = http_listener.accept().await {
+            stream.set_nodelay(true).ok();
+            let tr = t_http.clone();
+            tokio::spawn(async move {
+                let _ = handle_http_proxy_client(stream, tr).await;
+            });
+        }
+    }));
+
+    if let Some(psiphon_bind) = cfg.psiphon_bind {
+        let p_listener = TcpListener::bind(psiphon_bind).await?;
+        let t_psiphon = tracker.clone();
+        tasks.push(tokio::spawn(async move {
+            while let Ok((stream, _)) = p_listener.accept().await {
+                stream.set_nodelay(true).ok();
+                let tr = t_psiphon.clone();
+                tokio::spawn(async move {
+                    let _ = handle_socks5_client(stream, tr).await;
+                });
+            }
+        }));
+    }
+
+    if let Some(psiphon_http) = cfg.psiphon_http {
+        let ph_listener = TcpListener::bind(psiphon_http).await?;
+        let t_phttp = tracker.clone();
+        tasks.push(tokio::spawn(async move {
+            while let Ok((stream, _)) = ph_listener.accept().await {
+                stream.set_nodelay(true).ok();
+                let tr = t_phttp.clone();
+                tokio::spawn(async move {
+                    let _ = handle_http_proxy_client(stream, tr).await;
+                });
+            }
+        }));
+    }
+
+    sink(LogLevel::Ok, format!("aether embedded engine listening on {}", cfg.bind));
+    Ok(CoreProcess {
+        backend: RuntimeBackend::Embedded { exited, tasks },
+        tracker,
+    })
+}
+
+impl CoreProcess {
+    pub async fn spawn(binary: &Path, args: &[String], sink: LogSink) -> Result<CoreProcess> {
+        let tracker = Arc::new(Mutex::new(Tracker::default()));
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if binary.exists() {
+            let mut command = Command::new(binary);
+            if let Some(parent) = binary.parent() {
+                command.current_dir(parent);
+            }
+            command
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            #[cfg(windows)]
+            {
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                command.creation_flags(CREATE_NO_WINDOW);
+            }
+            #[cfg(unix)]
+            command.process_group(0);
+
+            if let Ok(mut child) = command.spawn() {
+                #[cfg(windows)]
+                let _ = job::assign(&child);
+                let pid = child.id();
+                let stdin = child.stdin.take();
+                if let Some(stdout) = child.stdout.take() {
+                    pump(stdout, tracker.clone(), sink.clone());
+                }
+                if let Some(stderr) = child.stderr.take() {
+                    pump(stderr, tracker.clone(), sink);
+                }
+                return Ok(CoreProcess {
+                    backend: RuntimeBackend::External { child, stdin, pid },
+                    tracker,
+                });
+            }
+        }
+
+        let _ = binary;
+        spawn_embedded(args, tracker, sink).await
     }
 
     pub fn stats(&self) -> Stats {
@@ -265,33 +499,46 @@ impl CoreProcess {
     }
 
     pub fn has_exited(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)))
+        match &mut self.backend {
+            RuntimeBackend::External { child, .. } => matches!(child.try_wait(), Ok(Some(_))),
+            RuntimeBackend::Embedded { exited, .. } => exited.load(Ordering::SeqCst),
+        }
     }
 
     pub async fn terminate(&mut self) {
-        if let Some(mut stdin) = self.stdin.take() {
-            let _ = stdin.write_all(b"quit\n").await;
-            let _ = stdin.flush().await;
-            drop(stdin);
-            if timeout(Duration::from_millis(1500), self.child.wait()).await.is_ok() {
-                return;
+        match &mut self.backend {
+            RuntimeBackend::External { child, stdin, pid } => {
+                if let Some(mut input) = stdin.take() {
+                    let _ = input.write_all(b"quit\n").await;
+                    let _ = input.flush().await;
+                    drop(input);
+                    if timeout(Duration::from_millis(1500), child.wait()).await.is_ok() {
+                        return;
+                    }
+                }
+                #[cfg(unix)]
+                if let Some(pid_val) = *pid {
+                    unsafe {
+                        libc::killpg(pid_val as libc::pid_t, libc::SIGTERM);
+                    }
+                    if timeout(Duration::from_secs(2), child.wait()).await.is_ok() {
+                        return;
+                    }
+                    unsafe {
+                        libc::killpg(pid_val as libc::pid_t, libc::SIGKILL);
+                    }
+                }
+                let _ = pid;
+                let _ = child.kill().await;
+                let _ = timeout(Duration::from_secs(2), child.wait()).await;
+            }
+            RuntimeBackend::Embedded { exited, tasks } => {
+                exited.store(true, Ordering::SeqCst);
+                for task in tasks.drain(..) {
+                    task.abort();
+                }
             }
         }
-        #[cfg(unix)]
-        if let Some(pid) = self.pid {
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGTERM);
-            }
-            if timeout(Duration::from_secs(2), self.child.wait()).await.is_ok() {
-                return;
-            }
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-        let _ = self.pid;
-        let _ = self.child.kill().await;
-        let _ = timeout(Duration::from_secs(2), self.child.wait()).await;
     }
 }
 

@@ -6,10 +6,14 @@ on:
       - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   NODE_OPTIONS: "--no-deprecation"
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-A warnings"
 
 jobs:
   build-desktop:
@@ -18,10 +22,13 @@ jobs:
       matrix:
         include:
           - os: windows-latest
+            platform: windows
             script: powershell -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1
           - os: ubuntu-22.04
+            platform: linux
             script: bash ./scripts/build-all.sh desktop
           - os: macos-latest
+            platform: macos
             script: bash ./scripts/build-all.sh desktop
     runs-on: ${{ matrix.os }}
     steps:
@@ -35,8 +42,8 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
@@ -44,7 +51,12 @@ jobs:
             libxdo-dev \
             libssl-dev \
             libfuse2 \
+            squashfs-tools \
+            desktop-file-utils \
+            xdg-utils \
+            rpm \
             file \
+            zip \
             build-essential \
             curl \
             wget
@@ -53,11 +65,14 @@ jobs:
       - name: Upload Desktop Installers
         uses: actions/upload-artifact@v4
         with:
-          name: radsho-${{ matrix.os }}
+          name: radsho-${{ matrix.platform }}
           path: dist-installers/*
+          if-no-files-found: error
 
   build-android:
     runs-on: ubuntu-22.04
+    env:
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.logging.level=lifecycle"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -79,7 +94,7 @@ jobs:
             SDKMANAGER="$(find "$SDK_ROOT" -name sdkmanager -type f | head -n 1)"
           fi
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          "$SDKMANAGER" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973" >/dev/null
           NDK_PATH="$SDK_ROOT/ndk/27.0.12077973"
           echo "NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
@@ -95,3 +110,34 @@ jobs:
         with:
           name: radsho-android
           path: dist-installers/*
+          if-no-files-found: error
+
+  publish-release:
+    needs: [build-desktop, build-android]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate Checksums and Summary
+        run: |
+          cd release-assets
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+          ls -lh
+      - name: Upload Combined Release Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: radsho-all-platforms-release
+          path: release-assets/*
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false

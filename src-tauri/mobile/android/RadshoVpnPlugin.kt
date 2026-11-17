@@ -2,17 +2,21 @@ package dev.witwizard.radsho.vpn
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Color
 import android.net.VpnService
 import android.system.Os
 import android.webkit.WebView
 import androidx.activity.result.ActivityResult
 import androidx.annotation.Keep
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.Plugin
+import kotlin.math.roundToInt
 
 @Keep
 @InvokeArg
@@ -31,6 +35,25 @@ class RadshoVpnPlugin(private val activity: Activity) : Plugin(activity) {
     override fun load(webView: WebView) {
         runCatching {
             Os.setenv("RADSHO_NATIVE_LIB_DIR", activity.applicationInfo.nativeLibraryDir, true)
+        }
+        activity.runOnUiThread {
+            runCatching {
+                activity.window.navigationBarColor = Color.parseColor("#0E1514")
+                activity.window.statusBarColor = Color.parseColor("#0E1514")
+            }
+            ViewCompat.setOnApplyWindowInsetsListener(webView) { view, windowInsets ->
+                val bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
+                val density = view.resources.displayMetrics.density.coerceAtLeast(1f)
+                val topPx = (bars.top / density).roundToInt()
+                val bottomPx = (bars.bottom / density).roundToInt()
+                webView.evaluateJavascript(
+                    "document.documentElement.style.setProperty('--safe-top', '${topPx}px');" +
+                        "document.documentElement.style.setProperty('--safe-bottom', '${bottomPx}px');",
+                    null
+                )
+                windowInsets
+            }
+            ViewCompat.requestApplyInsets(webView)
         }
     }
 

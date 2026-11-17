@@ -1,14 +1,20 @@
-use std::fs::{self, File};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use anyhow::Context;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use serde::{Deserialize, Serialize};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::fs::{self, File};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::io::Write;
 
 use crate::config::{EffectivePorts, RoutingSettings};
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyLock {
@@ -34,10 +40,12 @@ pub fn install_bridge(bridge: Box<dyn TunBridge>) {
     let _ = BRIDGE.set(bridge);
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn lock_path(dir: &Path) -> PathBuf {
     dir.join("proxy.lock")
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn write_lock_atomic(dir: &Path, lock: &ProxyLock) -> Result<()> {
     fs::create_dir_all(dir)?;
     let temporary = dir.join("proxy.lock.tmp");
@@ -48,10 +56,12 @@ fn write_lock_atomic(dir: &Path, lock: &ProxyLock) -> Result<()> {
     fs::rename(&temporary, lock_path(dir)).context("atomic proxy.lock rename failed")
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn read_lock(dir: &Path) -> Option<ProxyLock> {
     fs::read_to_string(lock_path(dir)).ok().and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn remove_lock(dir: &Path) {
     let _ = fs::remove_file(lock_path(dir));
 }
@@ -196,25 +206,6 @@ mod platform {
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
-mod platform {
-    use anyhow::Result;
-
-    use super::ProxyLock;
-
-    pub fn capture(_lock: &mut ProxyLock) -> Result<()> {
-        Ok(())
-    }
-
-    pub fn apply(_port: u16, _lock: &ProxyLock) -> Result<()> {
-        Ok(())
-    }
-
-    pub fn restore(_lock: &ProxyLock) -> Result<()> {
-        Ok(())
-    }
-}
-
 pub fn recover_if_needed(dir: &Path) -> bool {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -234,6 +225,7 @@ pub fn recover_if_needed(dir: &Path) -> bool {
 
 #[derive(Clone, Debug)]
 pub struct SystemProxy {
+    #[allow(dead_code)]
     dir: PathBuf,
 }
 
@@ -288,9 +280,7 @@ pub mod mobile {
     use tauri::Runtime;
     use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
 
-    use super::{
-        ProxyLock, TunBridge, install_bridge, platform, read_lock, remove_lock, write_lock_atomic,
-    };
+    use super::{TunBridge, install_bridge};
     use crate::config::{EffectivePorts, RoutingSettings};
 
     #[cfg(target_os = "android")]
@@ -337,14 +327,6 @@ pub mod mobile {
     }
 
     pub fn plugin<R: Runtime>() -> TauriPlugin<R> {
-        let _ = (
-            read_lock as fn(&std::path::Path) -> Option<ProxyLock>,
-            write_lock_atomic as fn(&std::path::Path, &ProxyLock) -> Result<()>,
-            remove_lock as fn(&std::path::Path),
-            platform::capture as fn(&mut ProxyLock) -> Result<()>,
-            platform::apply as fn(u16, &ProxyLock) -> Result<()>,
-            platform::restore as fn(&ProxyLock) -> Result<()>,
-        );
         Builder::new("radsho-vpn")
             .setup(|_app, api| {
                 #[cfg(target_os = "android")]

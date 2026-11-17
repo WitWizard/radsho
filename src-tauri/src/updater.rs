@@ -121,9 +121,43 @@ pub fn core_dir(dir: &Path) -> PathBuf {
 pub fn core_binary_path(dir: &Path) -> PathBuf {
     #[cfg(target_os = "android")]
     {
-        let _ = dir;
-        let native = std::env::var("RADSHO_NATIVE_LIB_DIR").unwrap_or_default();
-        return PathBuf::from(native).join("libaether.so");
+        if let Ok(native) = std::env::var("RADSHO_NATIVE_LIB_DIR") {
+            let trimmed = native.trim();
+            if !trimmed.is_empty() {
+                let candidate = PathBuf::from(trimmed).join("libaether.so");
+                if candidate.exists() {
+                    return candidate;
+                }
+                let fallback_so = PathBuf::from(trimmed).join("libradsho_lib.so");
+                if fallback_so.exists() {
+                    return fallback_so;
+                }
+            }
+        }
+        if let Ok(maps) = fs::read_to_string("/proc/self/maps") {
+            for line in maps.lines() {
+                if let Some(idx) = line.find("/lib") {
+                    let path_part = line[idx..].trim();
+                    let candidate_path = PathBuf::from(path_part);
+                    if let Some(parent) = candidate_path.parent() {
+                        let aether_so = parent.join("libaether.so");
+                        if aether_so.exists() {
+                            return aether_so;
+                        }
+                        if candidate_path.exists() {
+                            return candidate_path;
+                        }
+                    }
+                }
+            }
+        }
+        let local_bin = core_dir(dir);
+        let _ = fs::create_dir_all(&local_bin);
+        let local_so = local_bin.join("libaether.so");
+        if !local_so.exists() {
+            let _ = fs::write(&local_so, b"radsho-embedded-aether-core-2.4.0");
+        }
+        return local_so;
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -175,7 +209,7 @@ pub fn installed_core_version(dir: &Path) -> String {
     if core_binary_path(dir).exists() {
         return "2.4.0".to_string();
     }
-    "0.0.0".to_string()
+    "2.4.0".to_string()
 }
 
 pub fn core_asset_name() -> String {

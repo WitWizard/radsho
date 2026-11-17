@@ -27,8 +27,11 @@ export function DashboardView() {
   }
 
   return (
-    <div className="scroll-y h-full pb-36">
-      <section className="surface-dark rounded-b-[40px] bg-hero px-5 pb-5 pt-5 text-fg">
+    <div
+      className="scroll-y h-full"
+      style={{ paddingBottom: "calc(max(var(--safe-bottom, 0px), env(safe-area-inset-bottom, 0px)) + 108px)" }}
+    >
+      <section className="surface-dark rounded-b-[40px] bg-hero px-5 pb-5 pt-4 text-fg">
         <div className="mb-6 flex items-center justify-between">
           <button
             type="button"
@@ -60,7 +63,7 @@ export function DashboardView() {
         </button>
       </section>
       <div className="px-5">
-        <h2 className="m-0 mb-4 mt-9 text-center text-[36px] font-semibold tracking-tight text-fg">{t("advancedOptions")}</h2>
+        <h2 className="m-0 mb-4 mt-8 text-center text-[32px] font-semibold tracking-tight text-fg">{t("advancedOptions")}</h2>
         <AdvancedCards />
       </div>
     </div>
