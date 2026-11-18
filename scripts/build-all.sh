@@ -279,34 +279,14 @@ if main_activity.exists():
 
 import android.graphics.Color
 import android.os.Bundle
-import android.view.View
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 
 class MainActivity : TauriActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        @Suppress("DEPRECATION")
         window.statusBarColor = Color.parseColor("#0E1514")
+        @Suppress("DEPRECATION")
         window.navigationBarColor = Color.parseColor("#0E1514")
-        val controller = WindowInsetsControllerCompat(window, window.decorView)
-        controller.isAppearanceLightStatusBars = false
-        controller.isAppearanceLightNavigationBars = false
-
-        val contentView = window.decorView.findViewById<View>(android.R.id.content)
-        if (contentView != null) {
-            contentView.setBackgroundColor(Color.parseColor("#0E1514"))
-            ViewCompat.setOnApplyWindowInsetsListener(contentView) { view, windowInsets ->
-                val insets = windowInsets.getInsets(
-                    WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
-                )
-                view.setPadding(insets.left, insets.top, insets.right, insets.bottom)
-                WindowInsetsCompat.CONSUMED
-            }
-            ViewCompat.requestApplyInsets(contentView)
-        }
     }
 }
 """, encoding="utf-8")
