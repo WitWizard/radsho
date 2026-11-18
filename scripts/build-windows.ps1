@@ -14,20 +14,6 @@ Set-Location $root
 $pkgJson = Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json
 $version = $pkgJson.version
 
-function Invoke-Checked {
-    param([scriptblock]$Command)
-    $prevPref = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        & $Command
-        if ($LASTEXITCODE -ne 0) {
-            throw "Command failed with exit code $LASTEXITCODE"
-        }
-    } finally {
-        $ErrorActionPreference = $prevPref
-    }
-}
-
 function Invoke-Silent {
     param([string]$CommandLine)
     cmd.exe /c "$CommandLine >nul 2>&1"
@@ -47,7 +33,8 @@ function Invoke-TauriBuild {
     try {
         & npx tauri build --target $Target --bundles $BundleList --config $ConfigPath 2>&1 | ForEach-Object {
             $line = $_.ToString()
-            if ($line -notmatch "^\s*(Info|Warn|info:|warning:)") {
+            $clean = $line -replace '\x1b\[[0-9;]*[a-zA-Z]', ''
+            if ($clean -notmatch '^\s*(Info|Warn|info:|warning:|WARNING:)') {
                 Write-Host $line
             }
         }

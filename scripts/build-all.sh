@@ -15,7 +15,31 @@ OUT_DIR="$ROOT/dist-installers"
 VERSION="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
 
 run_clean() {
-  "$@" 2>&1 | awk '!/^[[:space:]]*(Info|Warn|info:|warning:)/'
+  python3 - "$@" <<'PY'
+import re
+import subprocess
+import sys
+
+ansi = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+noise = re.compile(
+    r"^\s*(Info|Warn|info:|warning:|WARNING:|Unable to strip|This Android Gradle plugin|You are strongly encouraged|If you are already using|To suppress this warning|android\.suppressUnsupportedCompileSdk)"
+)
+
+proc = subprocess.Popen(
+    sys.argv[1:],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    bufsize=1,
+)
+assert proc.stdout is not None
+for line in proc.stdout:
+    clean = ansi.sub("", line)
+    if not noise.match(clean):
+        sys.stdout.write(line)
+        sys.stdout.flush()
+sys.exit(proc.wait())
+PY
 }
 
 write_sig() {
@@ -211,6 +235,7 @@ build_android() {
 
   python3 - <<'PY'
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -318,6 +343,8 @@ ndk_ver = Path(ndk_home).name if ndk_home else "27.0.12077973"
 gradle_kts = Path("src-tauri/gen/android/app/build.gradle.kts")
 if gradle_kts.exists():
     gtext = gradle_kts.read_text(encoding="utf-8")
+    gtext = re.sub(r"compileSdk\s*=\s*\d+", "compileSdk = 34", gtext)
+    gtext = re.sub(r"targetSdk\s*=\s*\d+", "targetSdk = 34", gtext)
     if 'signingConfigs.getByName("debug")' not in gtext:
         gtext = gtext.replace(
             'getByName("release") {',
