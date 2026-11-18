@@ -28,21 +28,45 @@ function Invoke-TauriBuild {
         [string]$BundleList,
         [string]$ConfigPath
     )
-    $prevPref = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
+    $runnerJs = @'
+const { spawn } = require("child_process");
+const args = ["tauri", "build", "--target", process.argv[2], "--bundles", process.argv[3], "--config", process.argv[4]];
+const child = spawn("npx.cmd", args, { stdio: ["ignore", "pipe", "pipe"], shell: true });
+const ansi = /\x1b\[[0-9;]*[a-zA-Z]/g;
+const allowed = /^\s*(vite\s+v|✓|dist\/|Compiling\s+|Finished\s+|error(\[|:)|Error(\[|:|\s))/;
+const tail = [];
+function handleChunk(chunk) {
+  const lines = chunk.toString("utf8").split(/\r?\n/);
+  for (const line of lines) {
+    if (!line) continue;
+    tail.push(line);
+    if (tail.length > 80) tail.shift();
+    const clean = line.replace(ansi, "");
+    if (allowed.test(clean)) {
+      process.stdout.write(line + "\n");
+    }
+  }
+}
+child.stdout.on("data", handleChunk);
+child.stderr.on("data", handleChunk);
+child.on("close", (code) => {
+  if (code !== 0) {
+    for (const l of tail) process.stderr.write(l + "\n");
+    process.exit(code || 1);
+  }
+  process.exit(0);
+});
+'@
+    $runnerPath = Join-Path $root "target\tauri-runner.cjs"
+    New-Item -ItemType Directory -Force -Path (Split-Path $runnerPath) | Out-Null
+    [System.IO.File]::WriteAllText($runnerPath, $runnerJs, (New-Object System.Text.UTF8Encoding($false)))
     try {
-        & npx tauri build --target $Target --bundles $BundleList --config $ConfigPath 2>&1 | ForEach-Object {
-            $line = $_.ToString()
-            $clean = $line -replace '\x1b\[[0-9;]*[a-zA-Z]', ''
-            if ($clean -notmatch '^\s*(Info|Warn|info:|warning:|WARNING:)') {
-                Write-Host $line
-            }
-        }
+        & node $runnerPath $Target $BundleList $ConfigPath
         if ($LASTEXITCODE -ne 0) {
             throw "Tauri build failed with exit code $LASTEXITCODE"
         }
     } finally {
-        $ErrorActionPreference = $prevPref
+        Remove-Item $runnerPath -Force -ErrorAction SilentlyContinue
     }
 }
 

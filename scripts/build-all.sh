@@ -16,14 +16,14 @@ VERSION="$(python3 -c 'import json; print(json.load(open("package.json"))["versi
 
 run_clean() {
   python3 - "$@" <<'PY'
+from collections import deque
 import re
 import subprocess
 import sys
 
 ansi = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
-noise = re.compile(
-    r"^\s*(Info|Warn|info:|warning:|WARNING:|Unable to strip|This Android Gradle plugin|You are strongly encouraged|If you are already using|To suppress this warning|android\.suppressUnsupportedCompileSdk)"
-)
+allowed = re.compile(r"^\s*(vite\s+v|✓|dist/|Compiling\s+|Finished\s+|error(\[|:)|Error(\[|:|\s))")
+tail = deque(maxlen=80)
 
 proc = subprocess.Popen(
     sys.argv[1:],
@@ -34,11 +34,17 @@ proc = subprocess.Popen(
 )
 assert proc.stdout is not None
 for line in proc.stdout:
+    tail.append(line)
     clean = ansi.sub("", line)
-    if not noise.match(clean):
+    if allowed.match(clean):
         sys.stdout.write(line)
         sys.stdout.flush()
-sys.exit(proc.wait())
+code = proc.wait()
+if code != 0:
+    for line in tail:
+        sys.stderr.write(line)
+    sys.stderr.flush()
+sys.exit(code)
 PY
 }
 
@@ -355,6 +361,8 @@ if gradle_kts.exists():
             "android {",
             f'android {{\n    ndkVersion = "{ndk_ver}"\n    packaging {{\n        jniLibs {{\n            useLegacyPackaging = true\n            keepDebugSymbols.add("**/*.so")\n        }}\n    }}'
         )
+    if "JavaCompile" not in gtext:
+        gtext += '\ntasks.withType<JavaCompile>().configureEach {\n    options.compilerArgs.addAll(listOf("-Xlint:-deprecation", "-Xlint:-unchecked"))\n}\n'
     gradle_kts.write_text(gtext, encoding="utf-8")
 
 proguard = Path("src-tauri/gen/android/app/proguard-rules.pro")
