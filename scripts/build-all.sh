@@ -14,6 +14,10 @@ OVERLAY="$ROOT/src-tauri/tauri.updater.conf.json"
 OUT_DIR="$ROOT/dist-installers"
 VERSION="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
 
+run_clean() {
+  "$@" 2>&1 | awk '!/^[[:space:]]*(Info|Warn|info:|warning:)/'
+}
+
 write_sig() {
   local file="$1"
   if [ -f "$file" ] && [ ! -f "$file.sig" ]; then
@@ -29,12 +33,13 @@ write_sig() {
 
 prepare_toolchain() {
   if [ -f package-lock.json ]; then
-    npm ci --no-audit --no-fund --silent
+    npm ci --no-audit --no-fund --silent >/dev/null 2>&1
   else
-    npm install --no-audit --no-fund --silent
+    npm install --no-audit --no-fund --silent >/dev/null 2>&1
   fi
-  npm run --silent tauri -- icon public/radsho-icon.png >/dev/null 2>&1 || npm run tauri -- icon public/radsho-icon.png
+  npm run --silent tauri -- icon public/radsho-icon.png >/dev/null 2>&1
   mkdir -p src-tauri/core/pt
+  rm -f "$ROOT/src-tauri/core/"*.exe "$ROOT/src-tauri/core/pt/"*.exe 2>/dev/null || true
   if [ "$PLATFORM" = "desktop" ] && [ -d core ]; then
     find core -type f ! -name "*.exe" -exec cp -f {} src-tauri/core/ \; 2>/dev/null || true
   fi
@@ -50,21 +55,25 @@ prepare_signing() {
     export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
   else
     if [ ! -f "$KEY_PATH" ]; then
-      npm run --silent tauri -- signer generate --ci --force -w "$KEY_PATH" >/dev/null 2>&1 || npm run tauri -- signer generate --ci --force -w "$KEY_PATH"
+      npm run --silent tauri -- signer generate --ci --force -w "$KEY_PATH" >/dev/null 2>&1
     fi
     PUBLIC_KEY="$(tr -d '\r\n' < "$KEY_PATH.pub")"
     export TAURI_SIGNING_PRIVATE_KEY="$(tr -d '\r\n' < "$KEY_PATH")"
     export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
   fi
   printf "%s\n" "$PUBLIC_KEY" > "$OUT_DIR/radsho-public-key.asc"
-  python3 - "$OVERLAY" "$PUBLIC_KEY" <<'PY'
+  local create_updater="false"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    create_updater="true"
+  fi
+  python3 - "$OVERLAY" "$PUBLIC_KEY" "$create_updater" <<'PY'
 import json
 import sys
 
-target, key = sys.argv[1], sys.argv[2]
+target, key, enable_artifacts = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
 payload = {
     "bundle": {
-        "createUpdaterArtifacts": True
+        "createUpdaterArtifacts": enable_artifacts
     },
     "plugins": {
         "updater": {
@@ -90,7 +99,7 @@ build_desktop() {
   case "$(uname -s)" in
     Darwin)
       rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || true
-      npm run tauri -- build --target universal-apple-darwin --bundles app --config "$OVERLAY"
+      run_clean npm run --silent tauri -- build --target universal-apple-darwin --bundles app --config "$OVERLAY"
       local app_dir
       app_dir="$(find "$ROOT/target/universal-apple-darwin/release/bundle/macos" -name "*.app" -type d | head -n 1 || true)"
       if [ -n "$app_dir" ]; then
@@ -99,7 +108,7 @@ build_desktop() {
         mkdir -p "$dmg_stage"
         cp -R "$app_dir" "$dmg_stage/"
         ln -s /Applications "$dmg_stage/Applications" 2>/dev/null || true
-        hdiutil create -volname "Radsho" -srcfolder "$dmg_stage" -ov -format UDZO "$OUT_DIR/Radsho-macos-universal.dmg" >/dev/null
+        hdiutil create -volname "Radsho" -srcfolder "$dmg_stage" -ov -format UDZO "$OUT_DIR/Radsho-macos-universal.dmg" >/dev/null 2>&1
         rm -rf "$dmg_stage"
         cp -f "$OUT_DIR/Radsho-macos-universal.dmg" "$OUT_DIR/Radsho-macos-arm64.dmg"
         cp -f "$OUT_DIR/Radsho-macos-universal.dmg" "$OUT_DIR/Radsho-macos-64.dmg"
@@ -119,7 +128,7 @@ build_desktop() {
       export NO_STRIP=true
       export APPIMAGE_EXTRACT_AND_RUN=1
       export ARCH=x86_64
-      npm run tauri -- build --bundles deb,rpm,appimage --config "$OVERLAY" || npm run tauri -- build --bundles deb,rpm --config "$OVERLAY" || npm run tauri -- build --bundles deb --config "$OVERLAY"
+      run_clean npm run --silent tauri -- build --bundles deb,rpm --config "$OVERLAY"
 
       local deb_file
       deb_file="$(find "$ROOT/target/release/bundle/deb" -name "*.deb" -type f | head -n 1 || true)"
@@ -133,13 +142,6 @@ build_desktop() {
       if [ -n "$rpm_file" ]; then
         cp -f "$rpm_file" "$OUT_DIR/Radsho-linux-64.rpm"
         write_sig "$OUT_DIR/Radsho-linux-64.rpm"
-      fi
-
-      local appimage_file
-      appimage_file="$(find "$ROOT/target/release/bundle/appimage" -name "*.AppImage" -type f | head -n 1 || true)"
-      if [ -n "$appimage_file" ]; then
-        cp -f "$appimage_file" "$OUT_DIR/Radsho-linux-64.AppImage"
-        write_sig "$OUT_DIR/Radsho-linux-64.AppImage"
       fi
 
       if [ -f "$ROOT/target/release/radsho" ]; then
@@ -171,10 +173,10 @@ build_android() {
   touch "$ROOT/src-tauri/core/.keep"
 
   if [ ! -d src-tauri/gen/android ]; then
-    npm run --silent tauri -- android init --ci || npm run tauri -- android init
+    npm run --silent tauri -- android init --ci >/dev/null 2>&1 || npm run tauri -- android init >/dev/null 2>&1
   fi
 
-  npm run --silent tauri -- icon public/radsho-icon.png >/dev/null 2>&1 || npm run tauri -- icon public/radsho-icon.png
+  npm run --silent tauri -- icon public/radsho-icon.png >/dev/null 2>&1
 
   local java_dir="src-tauri/gen/android/app/src/main/java"
   mkdir -p "$java_dir/dev/witwizard/radsho/vpn" "$java_dir/hev/htproxy"
@@ -208,6 +210,7 @@ build_android() {
   fi
 
   python3 - <<'PY'
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -306,8 +309,11 @@ gradle_props = Path("src-tauri/gen/android/gradle.properties")
 if gradle_props.exists():
     gp_text = gradle_props.read_text(encoding="utf-8")
     if "org.gradle.warning.mode" not in gp_text:
-        gp_text += "\norg.gradle.warning.mode=none\nandroid.suppressUnsupportedCompileSdk=34\n"
+        gp_text += "\norg.gradle.warning.mode=none\norg.gradle.logging.level=quiet\nandroid.suppressUnsupportedCompileSdk=34,35,36\n"
         gradle_props.write_text(gp_text, encoding="utf-8")
+
+ndk_home = os.environ.get("NDK_HOME", "")
+ndk_ver = Path(ndk_home).name if ndk_home else "27.0.12077973"
 
 gradle_kts = Path("src-tauri/gen/android/app/build.gradle.kts")
 if gradle_kts.exists():
@@ -320,7 +326,7 @@ if gradle_kts.exists():
     if "useLegacyPackaging = true" not in gtext:
         gtext = gtext.replace(
             "android {",
-            "android {\n    packaging {\n        jniLibs {\n            useLegacyPackaging = true\n        }\n    }"
+            f'android {{\n    ndkVersion = "{ndk_ver}"\n    packaging {{\n        jniLibs {{\n            useLegacyPackaging = true\n            keepDebugSymbols.add("**/*.so")\n        }}\n    }}'
         )
     gradle_kts.write_text(gtext, encoding="utf-8")
 
@@ -381,7 +387,7 @@ for abi, cc in compilers.items():
 stub_c.unlink(missing_ok=True)
 PY
 
-  npm run tauri -- android build --apk --aab --split-per-abi
+  run_clean npm run --silent tauri -- android build --apk --aab --split-per-abi
 
   (
     cd src-tauri/gen/android
@@ -454,14 +460,14 @@ PY
 build_ios() {
   rustup target add aarch64-apple-ios aarch64-apple-ios-sim >/dev/null 2>&1 || true
   if [ ! -d src-tauri/gen/apple ]; then
-    npm run --silent tauri -- ios init --ci || npm run tauri -- ios init
+    npm run --silent tauri -- ios init --ci >/dev/null 2>&1 || npm run tauri -- ios init >/dev/null 2>&1
   fi
-  npm run --silent tauri -- icon public/radsho-icon.png >/dev/null 2>&1 || npm run tauri -- icon public/radsho-icon.png
+  npm run --silent tauri -- icon public/radsho-icon.png >/dev/null 2>&1
   mkdir -p src-tauri/gen/apple/Sources/radsho
   cp src-tauri/mobile/ios/RadshoVpnPlugin.swift src-tauri/gen/apple/Sources/radsho/
   mkdir -p src-tauri/gen/apple/PacketTunnel
   cp src-tauri/mobile/ios/PacketTunnelProvider.swift src-tauri/gen/apple/PacketTunnel/
-  npm run tauri -- ios build
+  run_clean npm run --silent tauri -- ios build
   find "$ROOT/src-tauri/gen/apple/build" -type f -name "*.ipa" -exec cp -f {} "$OUT_DIR/Radsho_${VERSION}_ios.ipa" \; 2>/dev/null || true
   if [ -f "$OUT_DIR/Radsho_${VERSION}_ios.ipa" ]; then
     write_sig "$OUT_DIR/Radsho_${VERSION}_ios.ipa"

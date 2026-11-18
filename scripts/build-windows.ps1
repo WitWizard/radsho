@@ -16,9 +16,46 @@ $version = $pkgJson.version
 
 function Invoke-Checked {
     param([scriptblock]$Command)
-    & $Command
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Command
+        if ($LASTEXITCODE -ne 0) {
+            throw "Command failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        $ErrorActionPreference = $prevPref
+    }
+}
+
+function Invoke-Silent {
+    param([string]$CommandLine)
+    cmd.exe /c "$CommandLine >nul 2>&1"
     if ($LASTEXITCODE -ne 0) {
-        throw "Command failed with exit code $LASTEXITCODE"
+        throw "Command failed with exit code $LASTEXITCODE : $CommandLine"
+    }
+}
+
+function Invoke-TauriBuild {
+    param(
+        [string]$Target,
+        [string]$BundleList,
+        [string]$ConfigPath
+    )
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & npx tauri build --target $Target --bundles $BundleList --config $ConfigPath 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            if ($line -notmatch "^\s*(Info|Warn|info:|warning:)") {
+                Write-Host $line
+            }
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "Tauri build failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        $ErrorActionPreference = $prevPref
     }
 }
 
@@ -60,7 +97,7 @@ function Ensure-Icon {
         $bmp.Save($iconPng, [System.Drawing.Imaging.ImageFormat]::Png)
         $bmp.Dispose()
     }
-    Invoke-Checked { npx tauri icon public/radsho-icon.png }
+    Invoke-Silent "npx tauri icon public/radsho-icon.png"
 }
 
 function Ensure-Core {
@@ -121,7 +158,7 @@ function Ensure-Core {
 }
 
 if (-not (Test-Path "node_modules")) {
-    Invoke-Checked { npm install --no-audit --no-fund --silent }
+    Invoke-Silent "npm install --no-audit --no-fund --silent"
 }
 
 Ensure-Icon
@@ -138,7 +175,7 @@ if ($env:RADSHO_UPDATER_PUBKEY -and $env:TAURI_SIGNING_PRIVATE_KEY) {
     }
 } else {
     if (-not (Test-Path $keyPath)) {
-        Invoke-Checked { npx tauri signer generate --ci --force -w $keyPath }
+        Invoke-Silent "npx tauri signer generate --ci --force -w `"$keyPath`""
     }
     $publicKey = (Get-Content "$keyPath.pub" -Raw).Trim()
     $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $keyPath -Raw).Trim()
@@ -174,18 +211,20 @@ New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
 
 [System.IO.File]::WriteAllText((Join-Path $artifacts "radsho-public-key.asc"), "$publicKey`n", (New-Object System.Text.UTF8Encoding($false)))
 
-foreach ($target in$Targets) {
-    Invoke-Checked { rustup target add $target }
-    Invoke-Checked { npx tauri build --target $target --bundles $Bundles --config$overlay }
+foreach ($target in $Targets) {
+    Invoke-Silent "rustup target add $target"
+    Invoke-TauriBuild -Target $target -BundleList $Bundles -ConfigPath $overlay
 
     $archLabel = if ($target -match "aarch64") { "arm64" } elseif ($target -match "i686") { "32" } else { "64" }
-    $relDir = Join-Path$root "target\$target\release"
+    $relDir = Join-Path $root "target\$target\release"
 
-    $nsisDir = Join-Path$relDir "bundle\nsis"
+    $nsisDir = Join-Path $relDir "bundle\nsis"
     if (Test-Path $nsisDir) {
-        $exe = Get-ChildItem -Path$nsisDir -Filter "*.exe" | Select-Object -First 1
-        if ($exe) {$destExe = Join-Path $artifacts "Radsho-windows-$archLabel-setup.exe"
-            Copy-Item $exe.FullName -Destination $destExe -Force$sig = "$($exe.FullName).sig"
+        $exe = Get-ChildItem -Path $nsisDir -Filter "*.exe" | Select-Object -First 1
+        if ($exe) {
+            $destExe = Join-Path $artifacts "Radsho-windows-$archLabel-setup.exe"
+            Copy-Item $exe.FullName -Destination $destExe -Force
+            $sig = "$($exe.FullName).sig"
             if (Test-Path $sig) {
                 Copy-Item $sig -Destination "$destExe.sig" -Force
             } else {
@@ -194,11 +233,13 @@ foreach ($target in$Targets) {
         }
     }
 
-    $msiDir = Join-Path$relDir "bundle\msi"
+    $msiDir = Join-Path $relDir "bundle\msi"
     if (Test-Path $msiDir) {
-        $msi = Get-ChildItem -Path$msiDir -Filter "*.msi" | Select-Object -First 1
-        if ($msi) {$destMsi = Join-Path $artifacts "Radsho-windows-$archLabel.msi"
-            Copy-Item $msi.FullName -Destination $destMsi -Force$sig = "$($msi.FullName).sig"
+        $msi = Get-ChildItem -Path $msiDir -Filter "*.msi" | Select-Object -First 1
+        if ($msi) {
+            $destMsi = Join-Path $artifacts "Radsho-windows-$archLabel.msi"
+            Copy-Item $msi.FullName -Destination $destMsi -Force
+            $sig = "$($msi.FullName).sig"
             if (Test-Path $sig) {
                 Copy-Item $sig -Destination "$destMsi.sig" -Force
             } else {
@@ -207,21 +248,24 @@ foreach ($target in$Targets) {
         }
     }
 
-    $mainExe = Join-Path$relDir "radsho.exe"
-    if (Test-Path $mainExe) {$portableStage = Join-Path $root "target\portable-stage-$archLabel"
-        if (Test-Path $portableStage) { Remove-Item$portableStage -Recurse -Force }
+    $mainExe = Join-Path $relDir "radsho.exe"
+    if (Test-Path $mainExe) {
+        $portableStage = Join-Path $root "target\portable-stage-$archLabel"
+        if (Test-Path $portableStage) {
+            Remove-Item $portableStage -Recurse -Force
+        }
         New-Item -ItemType Directory -Force -Path (Join-Path $portableStage "core") | Out-Null
-        Copy-Item $mainExe -Destination (Join-Path$portableStage "radsho.exe") -Force
+        Copy-Item $mainExe -Destination (Join-Path $portableStage "radsho.exe") -Force
         Copy-Item (Join-Path $root "src-tauri\core\*") -Destination (Join-Path $portableStage "core") -Recurse -Force
 
         $zipPortable = Join-Path $artifacts "Radsho-windows-$archLabel.zip"
         $zipDesktop = Join-Path $artifacts "Radsho-windows-$archLabel-desktop.zip"
         Compress-Archive -Path "$portableStage\*" -DestinationPath $zipPortable -Force
-        Copy-Item $zipPortable -Destination$zipDesktop -Force
+        Copy-Item $zipPortable -Destination $zipDesktop -Force
         Write-SigFile $zipPortable
         Write-SigFile $zipDesktop
         Remove-Item $portableStage -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
-Write-Host "Radsho v$version artifacts by WitWizard (Lilmmd & LFnighTT) are ready in$artifacts"
+Write-Host "Radsho v$version artifacts by WitWizard (Lilmmd & LFnighTT) are ready in $artifacts"
