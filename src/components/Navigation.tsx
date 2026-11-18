@@ -75,15 +75,12 @@ export function Sidebar() {
 
 export function MobileNav() {
   return (
-    <nav
-      className="fixed inset-x-4 z-30 rounded-[30px] border border-white/12 bg-hero/95 px-4 py-2 shadow-[0_12px_36px_rgba(0,0,0,0.45)] backdrop-blur-md"
-      style={{ bottom: "calc(max(var(--safe-bottom, 0px), env(safe-area-inset-bottom, 0px)) + 12px)" }}
-    >
-      <div className="flex items-center justify-between">
+    <div className="shrink-0 bg-bg px-4 pb-3 pt-2">
+      <nav className="mx-auto flex max-w-md items-center justify-between rounded-[28px] border border-white/12 bg-hero px-4 py-2 shadow-[0_10px_30px_rgba(0,0,0,0.35)]">
         {MOBILE_ITEMS.map((item) => (
           <NavButton key={item.id} item={item} size={52} />
         ))}
-      </div>
-    </nav>
+      </nav>
+    </div>
   );
 }

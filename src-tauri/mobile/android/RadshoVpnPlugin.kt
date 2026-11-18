@@ -5,10 +5,14 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.VpnService
 import android.system.Os
+import android.view.View
 import android.webkit.WebView
 import androidx.activity.result.ActivityResult
 import androidx.annotation.Keep
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -36,9 +40,26 @@ class RadshoVpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
         activity.runOnUiThread {
             runCatching {
-                WindowCompat.setDecorFitsSystemWindows(activity.window, true)
-                activity.window.navigationBarColor = Color.parseColor("#0E1514")
-                activity.window.statusBarColor = Color.parseColor("#0E1514")
+                val window = activity.window
+                WindowCompat.setDecorFitsSystemWindows(window, false)
+                window.statusBarColor = Color.parseColor("#0E1514")
+                window.navigationBarColor = Color.parseColor("#0E1514")
+                val controller = WindowInsetsControllerCompat(window, window.decorView)
+                controller.isAppearanceLightStatusBars = false
+                controller.isAppearanceLightNavigationBars = false
+
+                val contentView = window.decorView.findViewById<View>(android.R.id.content)
+                if (contentView != null) {
+                    contentView.setBackgroundColor(Color.parseColor("#0E1514"))
+                    ViewCompat.setOnApplyWindowInsetsListener(contentView) { view, windowInsets ->
+                        val insets = windowInsets.getInsets(
+                            WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+                        )
+                        view.setPadding(insets.left, insets.top, insets.right, insets.bottom)
+                        WindowInsetsCompat.CONSUMED
+                    }
+                    ViewCompat.requestApplyInsets(contentView)
+                }
             }
         }
     }

@@ -17,4 +17,8 @@ object TProxyService {
     @Keep
     @JvmStatic
     external fun TProxyStopService()
+
+    @Keep
+    @JvmStatic
+    external fun TProxyGetStats(): LongArray?
 }

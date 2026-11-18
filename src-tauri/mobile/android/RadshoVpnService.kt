@@ -1,7 +1,6 @@
 package dev.witwizard.radsho.vpn
 
 import android.content.Intent
-import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -57,13 +56,12 @@ class RadshoVpnService : VpnService() {
         val builder = Builder()
             .setSession("Radsho")
             .setMtu(8500)
-            .addAddress("198.18.0.1", 30)
+            .addAddress("172.19.0.1", 30)
             .addRoute("0.0.0.0", 0)
-            .addDnsServer("198.18.0.2")
+            .addDnsServer("172.19.0.2")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             runCatching {
                 builder.setMetered(false)
-                builder.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", args.httpPort))
             }
         }
         if (args.allowlist) {
@@ -80,16 +78,16 @@ class RadshoVpnService : VpnService() {
             """
             tunnel:
               mtu: 8500
-              ipv4: 198.18.0.1
+              ipv4: 172.19.0.1
             socks5:
               port: ${args.socksPort}
               address: 127.0.0.1
               udp: 'tcp'
             mapdns:
-              address: 198.18.0.2
+              address: 172.19.0.2
               port: 53
-              network: 240.0.0.0
-              netmask: 240.0.0.0
+              network: 198.18.0.0
+              netmask: 255.254.0.0
               cache-size: 10000
             misc:
               task-stack-size: 81920

@@ -194,6 +194,7 @@ build_android() {
         "$NDK_HOME/ndk-build" -j4 \
           NDK_PROJECT_PATH=. \
           APP_BUILD_SCRIPT=./Android.mk \
+          NDK_APPLICATION_MK=./Application.mk \
           APP_ABI="arm64-v8a armeabi-v7a x86_64 x86" \
           APP_PLATFORM=android-26 \
           APP_CFLAGS="-O3 -Wno-error" >/dev/null 2>&1 || true
@@ -278,18 +279,34 @@ if main_activity.exists():
 
 import android.graphics.Color
 import android.os.Bundle
+import android.view.View
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 
 class MainActivity : TauriActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, true)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = Color.parseColor("#0E1514")
         window.navigationBarColor = Color.parseColor("#0E1514")
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         controller.isAppearanceLightStatusBars = false
         controller.isAppearanceLightNavigationBars = false
+
+        val contentView = window.decorView.findViewById<View>(android.R.id.content)
+        if (contentView != null) {
+            contentView.setBackgroundColor(Color.parseColor("#0E1514"))
+            ViewCompat.setOnApplyWindowInsetsListener(contentView) { view, windowInsets ->
+                val insets = windowInsets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+                )
+                view.setPadding(insets.left, insets.top, insets.right, insets.bottom)
+                WindowInsetsCompat.CONSUMED
+            }
+            ViewCompat.requestApplyInsets(contentView)
+        }
     }
 }
 """, encoding="utf-8")
@@ -350,6 +367,12 @@ JNIEXPORT void JNICALL Java_hev_htproxy_TProxyService_TProxyStartService(JNIEnv 
 JNIEXPORT void JNICALL Java_hev_htproxy_TProxyService_TProxyStopService(JNIEnv *env, jclass clazz) {
     (void)env;
     (void)clazz;
+}
+
+JNIEXPORT jlongArray JNICALL Java_hev_htproxy_TProxyService_TProxyGetStats(JNIEnv *env, jclass clazz) {
+    (void)clazz;
+    jlongArray arr = (*env)->NewLongArray(env, 4);
+    return arr;
 }
 
 int radsho_aether_version(void) {
