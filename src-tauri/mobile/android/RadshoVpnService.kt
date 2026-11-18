@@ -25,6 +25,7 @@ class RadshoVpnService : VpnService() {
             "Spotify" to "com.spotify.music",
             "Steam" to "com.valvesoftware.android.steam.community",
             "WhatsApp" to "com.whatsapp",
+            "Discord" to "com.discord",
         )
     }
 
@@ -56,11 +57,12 @@ class RadshoVpnService : VpnService() {
         val builder = Builder()
             .setSession("Radsho")
             .setMtu(8500)
-            .addAddress("198.18.0.1", 32)
-            .addRoute("198.18.0.1", 32)
-            .addDnsServer(args.dns)
+            .addAddress("198.18.0.1", 30)
+            .addRoute("0.0.0.0", 0)
+            .addDnsServer("198.18.0.2")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             runCatching {
+                builder.setMetered(false)
                 builder.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", args.httpPort))
             }
         }
@@ -82,8 +84,15 @@ class RadshoVpnService : VpnService() {
             socks5:
               port: ${args.socksPort}
               address: 127.0.0.1
-              udp: udp
+              udp: 'tcp'
+            mapdns:
+              address: 198.18.0.2
+              port: 53
+              network: 240.0.0.0
+              netmask: 240.0.0.0
+              cache-size: 10000
             misc:
+              task-stack-size: 81920
               log-level: warn
             """.trimIndent()
         )

@@ -90,20 +90,23 @@ build_desktop() {
   case "$(uname -s)" in
     Darwin)
       rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || true
-      npm run tauri -- build --target universal-apple-darwin --bundles dmg,app --config "$OVERLAY"
-      local dmg_file
-      dmg_file="$(find "$ROOT/target/universal-apple-darwin/release/bundle/dmg" -name "*.dmg" -type f | head -n 1 || true)"
-      if [ -n "$dmg_file" ]; then
-        cp -f "$dmg_file" "$OUT_DIR/Radsho-macos-universal.dmg"
-        cp -f "$dmg_file" "$OUT_DIR/Radsho-macos-arm64.dmg"
-        cp -f "$dmg_file" "$OUT_DIR/Radsho-macos-64.dmg"
-        write_sig "$OUT_DIR/Radsho-macos-universal.dmg"
-        write_sig "$OUT_DIR/Radsho-macos-arm64.dmg"
-        write_sig "$OUT_DIR/Radsho-macos-64.dmg"
-      fi
+      npm run tauri -- build --target universal-apple-darwin --bundles app --config "$OVERLAY"
       local app_dir
       app_dir="$(find "$ROOT/target/universal-apple-darwin/release/bundle/macos" -name "*.app" -type d | head -n 1 || true)"
       if [ -n "$app_dir" ]; then
+        local dmg_stage="$ROOT/target/dmg-stage"
+        rm -rf "$dmg_stage"
+        mkdir -p "$dmg_stage"
+        cp -R "$app_dir" "$dmg_stage/"
+        ln -s /Applications "$dmg_stage/Applications" 2>/dev/null || true
+        hdiutil create -volname "Radsho" -srcfolder "$dmg_stage" -ov -format UDZO "$OUT_DIR/Radsho-macos-universal.dmg" >/dev/null
+        rm -rf "$dmg_stage"
+        cp -f "$OUT_DIR/Radsho-macos-universal.dmg" "$OUT_DIR/Radsho-macos-arm64.dmg"
+        cp -f "$OUT_DIR/Radsho-macos-universal.dmg" "$OUT_DIR/Radsho-macos-64.dmg"
+        write_sig "$OUT_DIR/Radsho-macos-universal.dmg"
+        write_sig "$OUT_DIR/Radsho-macos-arm64.dmg"
+        write_sig "$OUT_DIR/Radsho-macos-64.dmg"
+
         (cd "$(dirname "$app_dir")" && ditto -c -k --sequesterRsrc --keepParent "$(basename "$app_dir")" "$OUT_DIR/Radsho-macos-universal.zip")
         cp -f "$OUT_DIR/Radsho-macos-universal.zip" "$OUT_DIR/Radsho-macos-arm64.zip"
         cp -f "$OUT_DIR/Radsho-macos-universal.zip" "$OUT_DIR/Radsho-macos-64.zip"
@@ -179,6 +182,30 @@ build_android() {
   cp src-tauri/mobile/android/RadshoVpnService.kt "$java_dir/dev/witwizard/radsho/vpn/"
   cp src-tauri/mobile/android/TProxyService.kt "$java_dir/hev/htproxy/"
 
+  local jni_root="$ROOT/src-tauri/gen/android/app/src/main/jniLibs"
+  mkdir -p "$jni_root/arm64-v8a" "$jni_root/armeabi-v7a" "$jni_root/x86_64" "$jni_root/x86"
+
+  if [ -n "${NDK_HOME:-}" ] && [ -x "$NDK_HOME/ndk-build" ]; then
+    local hev_dir="/tmp/hev-socks5-tunnel"
+    rm -rf "$hev_dir"
+    if git clone --depth=1 --recursive https://github.com/heiher/hev-socks5-tunnel.git "$hev_dir" >/dev/null 2>&1; then
+      (
+        cd "$hev_dir"
+        "$NDK_HOME/ndk-build" -j4 \
+          NDK_PROJECT_PATH=. \
+          APP_BUILD_SCRIPT=./Android.mk \
+          APP_ABI="arm64-v8a armeabi-v7a x86_64 x86" \
+          APP_PLATFORM=android-26 \
+          APP_CFLAGS="-O3 -Wno-error" >/dev/null 2>&1 || true
+      )
+      for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+        if [ -f "$hev_dir/libs/$abi/libhev-socks5-tunnel.so" ]; then
+          cp -f "$hev_dir/libs/$abi/libhev-socks5-tunnel.so" "$jni_root/$abi/libhev-socks5-tunnel.so"
+        fi
+      done
+    fi
+  fi
+
   python3 - <<'PY'
 import shutil
 import subprocess
@@ -244,6 +271,28 @@ adaptive_xml = """<?xml version="1.0" encoding="utf-8"?>
 """
 (anydpi_dir / "ic_launcher.xml").write_text(adaptive_xml, encoding="utf-8")
 (anydpi_dir / "ic_launcher_round.xml").write_text(adaptive_xml, encoding="utf-8")
+
+main_activity = Path("src-tauri/gen/android/app/src/main/java/dev/witwizard/radsho/MainActivity.kt")
+if main_activity.exists():
+    main_activity.write_text("""package dev.witwizard.radsho
+
+import android.graphics.Color
+import android.os.Bundle
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
+
+class MainActivity : TauriActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        window.statusBarColor = Color.parseColor("#0E1514")
+        window.navigationBarColor = Color.parseColor("#0E1514")
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.isAppearanceLightStatusBars = false
+        controller.isAppearanceLightNavigationBars = false
+    }
+}
+""", encoding="utf-8")
 
 manifest = Path("src-tauri/gen/android/app/src/main/AndroidManifest.xml")
 snippet = Path("src-tauri/mobile/android/service-manifest.xml").read_text(encoding="utf-8")
@@ -323,7 +372,8 @@ for abi, cc in compilers.items():
     if cc_bin:
         for lib_name in ("libaether.so", "libpsiphon-tunnel-core.so", "libhev-socks5-tunnel.so"):
             out_so = abi_dir / lib_name
-            subprocess.run([cc_bin, "-shared", "-fPIC", "-O2", "-s", str(stub_c), "-o", str(out_so)], check=True)
+            if not out_so.exists():
+                subprocess.run([cc_bin, "-shared", "-fPIC", "-O2", "-s", str(stub_c), "-o", str(out_so)], check=True)
 
 stub_c.unlink(missing_ok=True)
 PY

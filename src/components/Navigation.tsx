@@ -76,12 +76,12 @@ export function Sidebar() {
 export function MobileNav() {
   return (
     <nav
-      className="fixed inset-x-3 z-30 rounded-[32px] border border-white/10 bg-hero/95 px-4 py-2.5 shadow-[0_12px_40px_rgba(0,0,0,0.45)] backdrop-blur-md"
-      style={{ bottom: "calc(max(var(--safe-bottom, 0px), env(safe-area-inset-bottom, 0px)) + 14px)" }}
+      className="fixed inset-x-4 z-30 rounded-[30px] border border-white/12 bg-hero/95 px-4 py-2 shadow-[0_12px_36px_rgba(0,0,0,0.45)] backdrop-blur-md"
+      style={{ bottom: "calc(max(var(--safe-bottom, 0px), env(safe-area-inset-bottom, 0px)) + 12px)" }}
     >
       <div className="flex items-center justify-between">
         {MOBILE_ITEMS.map((item) => (
-          <NavButton key={item.id} item={item} size={56} />
+          <NavButton key={item.id} item={item} size={52} />
         ))}
       </div>
     </nav>

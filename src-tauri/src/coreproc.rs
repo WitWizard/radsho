@@ -1,17 +1,18 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::task::JoinHandle;
@@ -59,6 +60,339 @@ enum RuntimeBackend {
 pub struct CoreProcess {
     backend: RuntimeBackend,
     tracker: Arc<Mutex<Tracker>>,
+}
+
+const CLEAN_CF_IPS: [Ipv4Addr; 6] = [
+    Ipv4Addr::new(162, 159, 135, 42),
+    Ipv4Addr::new(104, 18, 2, 161),
+    Ipv4Addr::new(172, 67, 73, 163),
+    Ipv4Addr::new(104, 16, 132, 229),
+    Ipv4Addr::new(162, 159, 128, 7),
+    Ipv4Addr::new(104, 17, 64, 4),
+];
+
+const UPSTREAM_SOURCES: [&str; 4] = [
+    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+    "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=2500&country=all",
+];
+
+fn dns_cache() -> &'static Mutex<HashMap<String, IpAddr>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, IpAddr>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn upstream_pool() -> &'static Mutex<Vec<SocketAddr>> {
+    static POOL: OnceLock<Mutex<Vec<SocketAddr>>> = OnceLock::new();
+    POOL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn doh_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(4))
+            .timeout(Duration::from_secs(6))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
+fn is_poisoned_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 0
+                || o[0] == 127
+                || (o[0] == 10 && o[1] == 10)
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+                || o[0] >= 240
+        }
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+    }
+}
+
+fn is_cloudflare_ip(ip: IpAddr) -> bool {
+    let IpAddr::V4(v4) = ip else { return false };
+    let o = v4.octets();
+    (o[0] == 104 && (16..=31).contains(&o[1]))
+        || (o[0] == 172 && (64..=71).contains(&o[1]))
+        || (o[0] == 162 && (158..=159).contains(&o[1]))
+        || (o[0] == 188 && o[1] == 114 && (96..=99).contains(&o[2]))
+        || (o[0] == 141 && o[1] == 101 && (64..=127).contains(&o[2]))
+}
+
+fn is_telegram_ip(ip: IpAddr) -> bool {
+    let IpAddr::V4(v4) = ip else { return false };
+    let o = v4.octets();
+    (o[0] == 149 && o[1] == 154 && (160..=175).contains(&o[2]))
+        || (o[0] == 91 && o[1] == 108 && ((4..=23).contains(&o[2]) || (56..=59).contains(&o[2])))
+        || (o[0] == 95 && o[1] == 161 && (64..=79).contains(&o[2]))
+        || (o[0] == 185 && o[1] == 76 && o[2] == 151)
+        || (o[0] == 91 && o[1] == 105 && (192..=193).contains(&o[2]))
+}
+
+fn is_sanctioned_or_blocked_host(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    h.ends_with("kimi.ai")
+        || h.ends_with("claude.ai")
+        || h.ends_with("anthropic.com")
+        || h.ends_with("huggingface.co")
+        || h.ends_with("openai.com")
+        || h.ends_with("chatgpt.com")
+        || h.ends_with("telegram.org")
+        || h.ends_with("t.me")
+        || h.ends_with("telegra.ph")
+}
+
+async fn resolve_domain_doh(domain: &str) -> Option<IpAddr> {
+    if let Ok(ip) = domain.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    if let Ok(guard) = dns_cache().lock() {
+        if let Some(&cached) = guard.get(domain) {
+            return Some(cached);
+        }
+    }
+    let lower = domain.to_ascii_lowercase();
+    if lower == "www.cloudflare.com" || lower == "cloudflare.com" || lower == "speed.cloudflare.com" {
+        return Some(IpAddr::V4(CLEAN_CF_IPS[0]));
+    }
+    let endpoints = [
+        format!("https://1.1.1.1/dns-query?name={domain}&type=A"),
+        format!("https://1.0.0.1/dns-query?name={domain}&type=A"),
+        format!("https://8.8.8.8/resolve?name={domain}&type=A"),
+    ];
+    for url in endpoints {
+        let Ok(resp) = doh_client()
+            .get(&url)
+            .header("Accept", "application/dns-json")
+            .send()
+            .await
+        else {
+            continue;
+        };
+        let Ok(json) = resp.json::<serde_json::Value>().await else {
+            continue;
+        };
+        if let Some(answers) = json.get("Answer").and_then(|a| a.as_array()) {
+            for ans in answers {
+                if ans.get("type").and_then(|t| t.as_u64()) == Some(1) {
+                    if let Some(data) = ans.get("data").and_then(|d| d.as_str()) {
+                        if let Ok(ip) = data.trim().parse::<IpAddr>() {
+                            if !is_poisoned_ip(ip) {
+                                let final_ip = if is_cloudflare_ip(ip) {
+                                    IpAddr::V4(CLEAN_CF_IPS[0])
+                                } else {
+                                    ip
+                                };
+                                if let Ok(mut guard) = dns_cache().lock() {
+                                    guard.insert(domain.to_string(), final_ip);
+                                }
+                                return Some(final_ip);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mut addrs) = tokio::net::lookup_host((domain, 443)).await {
+        while let Some(sock) = addrs.next() {
+            if !is_poisoned_ip(sock.ip()) {
+                return Some(sock.ip());
+            }
+        }
+    }
+    None
+}
+
+async fn resolve_dns_wire_packet(packet: &[u8]) -> Option<Vec<u8>> {
+    for doh_url in ["https://1.1.1.1/dns-query", "https://1.0.0.1/dns-query"] {
+        if let Ok(resp) = doh_client()
+            .post(doh_url)
+            .header("Content-Type", "application/dns-message")
+            .header("Accept", "application/dns-message")
+            .body(packet.to_vec())
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(bytes) = resp.bytes().await {
+                    if bytes.len() >= 12 {
+                        return Some(bytes.to_vec());
+                    }
+                }
+            }
+        }
+    }
+    for tcp_dns in ["1.1.1.1:53", "8.8.8.8:53"] {
+        if let Ok(Ok(mut s)) = timeout(Duration::from_secs(3), TcpStream::connect(tcp_dns)).await {
+            let len_bytes = (packet.len() as u16).to_be_bytes();
+            if s.write_all(&len_bytes).await.is_ok() && s.write_all(packet).await.is_ok() {
+                let mut rlen = [0u8; 2];
+                if timeout(Duration::from_secs(3), s.read_exact(&mut rlen)).await.is_ok() {
+                    let size = u16::from_be_bytes(rlen) as usize;
+                    let mut out = vec![0u8; size];
+                    if timeout(Duration::from_secs(3), s.read_exact(&mut out)).await.is_ok() {
+                        return Some(out);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn connect_via_upstream_socks5(proxy: SocketAddr, host: &str, port: u16) -> Result<TcpStream> {
+    let mut s = timeout(Duration::from_millis(2400), TcpStream::connect(proxy)).await??;
+    s.set_nodelay(true).ok();
+    s.write_all(&[0x05, 0x01, 0x00]).await?;
+    let mut greeting = [0u8; 2];
+    timeout(Duration::from_millis(2000), s.read_exact(&mut greeting)).await??;
+    if greeting[0] != 0x05 || greeting[1] != 0x00 {
+        bail!("upstream socks5 auth rejected");
+    }
+    let mut req = Vec::with_capacity(7 + host.len());
+    req.extend_from_slice(&[0x05, 0x01, 0x00]);
+    if let Ok(ipv4) = host.parse::<Ipv4Addr>() {
+        req.push(0x01);
+        req.extend_from_slice(&ipv4.octets());
+    } else {
+        req.push(0x03);
+        req.push(host.len() as u8);
+        req.extend_from_slice(host.as_bytes());
+    }
+    req.extend_from_slice(&port.to_be_bytes());
+    s.write_all(&req).await?;
+    let mut head = [0u8; 4];
+    timeout(Duration::from_millis(3000), s.read_exact(&mut head)).await??;
+    if head[0] != 0x05 || head[1] != 0x00 {
+        bail!("upstream socks5 connect failed");
+    }
+    let skip = match head[3] {
+        0x01 => 6,
+        0x04 => 18,
+        0x03 => {
+            let mut l = [0u8; 1];
+            s.read_exact(&mut l).await?;
+            l[0] as usize + 2
+        }
+        _ => bail!("invalid atyp"),
+    };
+    let mut discard = vec![0u8; skip];
+    s.read_exact(&mut discard).await?;
+    Ok(s)
+}
+
+async fn verify_candidate_proxy(addr: SocketAddr) -> bool {
+    if let Ok(mut stream) = connect_via_upstream_socks5(addr, "149.154.167.50", 443).await {
+        let _ = stream.shutdown().await;
+        return true;
+    }
+    if let Ok(mut stream) = connect_via_upstream_socks5(addr, "www.cloudflare.com", 443).await {
+        let _ = stream.shutdown().await;
+        return true;
+    }
+    false
+}
+
+async fn refresh_upstream_pool() {
+    let mut candidates: Vec<SocketAddr> = Vec::new();
+    for url in UPSTREAM_SOURCES {
+        if let Ok(resp) = doh_client().get(url).send().await {
+            if let Ok(text) = resp.text().await {
+                for line in text.lines().take(160) {
+                    if let Ok(addr) = line.trim().parse::<SocketAddr>() {
+                        if !candidates.contains(&addr) {
+                            candidates.push(addr);
+                        }
+                    }
+                }
+            }
+        }
+        if candidates.len() >= 120 {
+            break;
+        }
+    }
+    let mut handles = Vec::new();
+    for addr in candidates.into_iter().take(80) {
+        handles.push(tokio::spawn(async move {
+            if verify_candidate_proxy(addr).await {
+                Some(addr)
+            } else {
+                None
+            }
+        }));
+    }
+    let mut verified = Vec::new();
+    for h in handles {
+        if let Ok(Some(addr)) = h.await {
+            verified.push(addr);
+            if verified.len() >= 16 {
+                break;
+            }
+        }
+    }
+    if !verified.is_empty() {
+        if let Ok(mut pool) = upstream_pool().lock() {
+            *pool = verified;
+        }
+    }
+}
+
+async fn connect_smart(host: &str, port: u16) -> Result<TcpStream> {
+    let parsed_ip = host.parse::<IpAddr>().ok();
+    let needs_upstream = parsed_ip.map(is_telegram_ip).unwrap_or(false) || is_sanctioned_or_blocked_host(host);
+
+    let pool_snapshot: Vec<SocketAddr> = upstream_pool()
+        .lock()
+        .map(|g| g.iter().copied().take(5).collect())
+        .unwrap_or_default();
+
+    if needs_upstream && !pool_snapshot.is_empty() {
+        for proxy in &pool_snapshot {
+            if let Ok(s) = connect_via_upstream_socks5(*proxy, host, port).await {
+                return Ok(s);
+            }
+        }
+    }
+
+    if let Some(ip) = resolve_domain_doh(host).await {
+        if is_telegram_ip(ip) && !pool_snapshot.is_empty() {
+            for proxy in &pool_snapshot {
+                if let Ok(s) = connect_via_upstream_socks5(*proxy, host, port).await {
+                    return Ok(s);
+                }
+            }
+        }
+        let target = SocketAddr::new(ip, port);
+        if let Ok(Ok(s)) = timeout(Duration::from_millis(3200), TcpStream::connect(target)).await {
+            s.set_nodelay(true).ok();
+            return Ok(s);
+        }
+        if is_cloudflare_ip(ip) {
+            for cf_ip in CLEAN_CF_IPS {
+                let alt = SocketAddr::new(IpAddr::V4(cf_ip), port);
+                if let Ok(Ok(s)) = timeout(Duration::from_millis(2200), TcpStream::connect(alt)).await {
+                    s.set_nodelay(true).ok();
+                    return Ok(s);
+                }
+            }
+        }
+    }
+
+    for proxy in &pool_snapshot {
+        if let Ok(s) = connect_via_upstream_socks5(*proxy, host, port).await {
+            return Ok(s);
+        }
+    }
+
+    let fallback_target = format!("{host}:{port}");
+    let s = timeout(Duration::from_secs(4), TcpStream::connect(&fallback_target)).await??;
+    s.set_nodelay(true).ok();
+    Ok(s)
 }
 
 #[cfg(windows)]
@@ -278,26 +612,156 @@ fn add_traffic(tracker: &Arc<Mutex<Tracker>>, rx_bytes: u64, tx_bytes: u64) {
     }
 }
 
-async fn relay_streams(mut client: TcpStream, mut remote: TcpStream, tracker: Arc<Mutex<Tracker>>) -> Result<()> {
-    let mut first = [0u8; 2048];
-    if let Ok(Ok(n)) = timeout(Duration::from_millis(800), client.read(&mut first)).await {
-        if n > 0 {
-            if first[0] == 0x16 && n > 24 {
-                let split = 11.min(n / 2);
-                remote.write_all(&first[..split]).await?;
+async fn write_tls_fragmented(remote: &mut TcpStream, data: &[u8]) -> Result<()> {
+    if data.len() > 5 && data[0] == 0x16 && data[1] == 0x03 {
+        let rec_len = u16::from_be_bytes([data[3], data[4]]) as usize;
+        if 5 + rec_len == data.len() && rec_len > 8 {
+            let payload = &data[5..];
+            let sizes = [2usize, 14, 21, 29, 43];
+            let mut offset = 0usize;
+            let mut idx = 0usize;
+            while offset < payload.len() {
+                let step = if idx < sizes.len() {
+                    sizes[idx].min(payload.len() - offset)
+                } else {
+                    payload.len() - offset
+                };
+                let chunk = &payload[offset..offset + step];
+                let len_bytes = (chunk.len() as u16).to_be_bytes();
+                let mut frame = Vec::with_capacity(5 + chunk.len());
+                frame.extend_from_slice(&[0x16, data[1], data[2], len_bytes[0], len_bytes[1]]);
+                frame.extend_from_slice(chunk);
+                remote.write_all(&frame).await?;
                 remote.flush().await?;
-                sleep(Duration::from_millis(12)).await;
-                remote.write_all(&first[split..n]).await?;
-                remote.flush().await?;
-            } else {
-                remote.write_all(&first[..n]).await?;
-                remote.flush().await?;
+                offset += step;
+                idx += 1;
+                if offset < payload.len() {
+                    sleep(Duration::from_millis(6)).await;
+                }
             }
+            return Ok(());
+        }
+    }
+    if data.len() > 24 {
+        let split = 5.min(data.len() / 2);
+        remote.write_all(&data[..split]).await?;
+        remote.flush().await?;
+        sleep(Duration::from_millis(6)).await;
+        remote.write_all(&data[split..]).await?;
+        remote.flush().await?;
+    } else {
+        remote.write_all(data).await?;
+        remote.flush().await?;
+    }
+    Ok(())
+}
+
+async fn relay_streams(mut client: TcpStream, mut remote: TcpStream, tracker: Arc<Mutex<Tracker>>) -> Result<()> {
+    let mut first = [0u8; 4096];
+    if let Ok(Ok(n)) = timeout(Duration::from_millis(250), client.read(&mut first)).await {
+        if n > 0 {
+            write_tls_fragmented(&mut remote, &first[..n]).await?;
             add_traffic(&tracker, 0, n as u64);
         }
     }
     if let Ok((up, down)) = tokio::io::copy_bidirectional(&mut client, &mut remote).await {
         add_traffic(&tracker, down, up);
+    }
+    Ok(())
+}
+
+async fn handle_hev_udp_in_tcp(mut stream: TcpStream, tracker: Arc<Mutex<Tracker>>) -> Result<()> {
+    stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]).await?;
+    loop {
+        let mut hdr = [0u8; 3];
+        if timeout(Duration::from_secs(30), stream.read_exact(&mut hdr)).await.is_err() {
+            break;
+        }
+        let datalen = u16::from_be_bytes([hdr[0], hdr[1]]) as usize;
+        let atyp = hdr[2];
+        let mut addr_bytes = Vec::new();
+        let port: u16;
+        match atyp {
+            0x01 => {
+                let mut b = [0u8; 6];
+                stream.read_exact(&mut b).await?;
+                addr_bytes.extend_from_slice(&b);
+                port = u16::from_be_bytes([b[4], b[5]]);
+            }
+            0x03 => {
+                let mut l = [0u8; 1];
+                stream.read_exact(&mut l).await?;
+                let mut b = vec![0u8; l[0] as usize + 2];
+                stream.read_exact(&mut b).await?;
+                addr_bytes.push(l[0]);
+                addr_bytes.extend_from_slice(&b);
+                port = u16::from_be_bytes([b[b.len() - 2], b[b.len() - 1]]);
+            }
+            0x04 => {
+                let mut b = [0u8; 18];
+                stream.read_exact(&mut b).await?;
+                addr_bytes.extend_from_slice(&b);
+                port = u16::from_be_bytes([b[16], b[17]]);
+            }
+            _ => break,
+        }
+        let mut payload = vec![0u8; datalen];
+        stream.read_exact(&mut payload).await?;
+        add_traffic(&tracker, 0, datalen as u64);
+        if port == 53 {
+            if let Some(ans) = resolve_dns_wire_packet(&payload).await {
+                let rlen = (ans.len() as u16).to_be_bytes();
+                let mut reply = Vec::with_capacity(3 + addr_bytes.len() + ans.len());
+                reply.extend_from_slice(&[rlen[0], rlen[1], atyp]);
+                reply.extend_from_slice(&addr_bytes);
+                reply.extend_from_slice(&ans);
+                stream.write_all(&reply).await?;
+                add_traffic(&tracker, ans.len() as u64, 0);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_socks5_udp_associate(mut stream: TcpStream, tracker: Arc<Mutex<Tracker>>) -> Result<()> {
+    let udp = UdpSocket::bind("127.0.0.1:0").await?;
+    let local_port = udp.local_addr()?.port().to_be_bytes();
+    stream
+        .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, local_port[0], local_port[1]])
+        .await?;
+    let mut buf = [0u8; 4096];
+    loop {
+        tokio::select! {
+            res = udp.recv_from(&mut buf) => {
+                let Ok((n, client_addr)) = res else { break };
+                if n < 10 || buf[2] != 0x00 { continue; }
+                let atyp = buf[3];
+                let (hdr_len, port) = match atyp {
+                    0x01 if n >= 10 => (10usize, u16::from_be_bytes([buf[8], buf[9]])),
+                    0x03 if n >= 7 => {
+                        let dlen = buf[4] as usize;
+                        if n < 7 + dlen { continue; }
+                        (7 + dlen, u16::from_be_bytes([buf[5 + dlen], buf[6 + dlen]]))
+                    }
+                    0x04 if n >= 22 => (22usize, u16::from_be_bytes([buf[20], buf[21]])),
+                    _ => continue,
+                };
+                let payload = &buf[hdr_len..n];
+                add_traffic(&tracker, 0, payload.len() as u64);
+                if port == 53 {
+                    if let Some(ans) = resolve_dns_wire_packet(payload).await {
+                        let mut reply = Vec::with_capacity(hdr_len + ans.len());
+                        reply.extend_from_slice(&buf[..hdr_len]);
+                        reply.extend_from_slice(&ans);
+                        let _ = udp.send_to(&reply, client_addr).await;
+                        add_traffic(&tracker, ans.len() as u64, 0);
+                    }
+                }
+            }
+            r = stream.read(&mut [0u8; 1]) => {
+                if r.unwrap_or(0) == 0 { break; }
+            }
+        }
     }
     Ok(())
 }
@@ -315,11 +779,10 @@ async fn handle_socks5_client(mut stream: TcpStream, tracker: Arc<Mutex<Tracker>
 
     let mut req = [0u8; 4];
     timeout(Duration::from_secs(6), stream.read_exact(&mut req)).await??;
-    if req[0] != 0x05 || req[1] != 0x01 {
-        let _ = stream.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+    if req[0] != 0x05 {
         return Ok(());
     }
-
+    let cmd = req[1];
     let host = match req[3] {
         0x01 => {
             let mut ip = [0u8; 4];
@@ -336,7 +799,7 @@ async fn handle_socks5_client(mut stream: TcpStream, tracker: Arc<Mutex<Tracker>
         0x04 => {
             let mut ip = [0u8; 16];
             stream.read_exact(&mut ip).await?;
-            std::net::Ipv6Addr::from(ip).to_string()
+            Ipv6Addr::from(ip).to_string()
         }
         _ => return Ok(()),
     };
@@ -344,14 +807,23 @@ async fn handle_socks5_client(mut stream: TcpStream, tracker: Arc<Mutex<Tracker>
     stream.read_exact(&mut port_buf).await?;
     let port = u16::from_be_bytes(port_buf);
 
-    let target = format!("{host}:{port}");
-    match timeout(Duration::from_secs(8), TcpStream::connect(&target)).await {
-        Ok(Ok(remote)) => {
-            remote.set_nodelay(true).ok();
+    if cmd == 0x04 {
+        return handle_hev_udp_in_tcp(stream, tracker).await;
+    }
+    if cmd == 0x03 {
+        return handle_socks5_udp_associate(stream, tracker).await;
+    }
+    if cmd != 0x01 {
+        let _ = stream.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+        return Ok(());
+    }
+
+    match connect_smart(&host, port).await {
+        Ok(remote) => {
             stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]).await?;
             relay_streams(stream, remote, tracker).await?;
         }
-        _ => {
+        Err(_) => {
             let _ = stream.write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
         }
     }
@@ -371,9 +843,11 @@ async fn handle_http_proxy_client(mut stream: TcpStream, tracker: Arc<Mutex<Trac
         return Ok(());
     }
     if parts[0].eq_ignore_ascii_case("CONNECT") {
-        let target = parts[1];
-        if let Ok(Ok(remote)) = timeout(Duration::from_secs(8), TcpStream::connect(target)).await {
-            remote.set_nodelay(true).ok();
+        let (host, port) = match parts[1].rsplit_once(':') {
+            Some((h, p)) => (h, p.parse::<u16>().unwrap_or(443)),
+            None => (parts[1], 443),
+        };
+        if let Ok(remote) = connect_smart(host, port).await {
             stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
             relay_streams(stream, remote, tracker).await?;
         } else {
@@ -387,6 +861,13 @@ async fn spawn_embedded(args: &[String], tracker: Arc<Mutex<Tracker>>, sink: Log
     let cfg = parse_embedded_args(args);
     let exited = Arc::new(AtomicBool::new(false));
     let mut tasks = Vec::new();
+
+    tasks.push(tokio::spawn(async move {
+        loop {
+            refresh_upstream_pool().await;
+            sleep(Duration::from_secs(180)).await;
+        }
+    }));
 
     let socks_listener = TcpListener::bind(cfg.bind).await?;
     let t_socks = tracker.clone();

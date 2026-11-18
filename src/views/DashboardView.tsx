@@ -10,7 +10,7 @@ export function DashboardView() {
 
   if (!isMobile) {
     return (
-      <div className="scroll-y h-full pe-3">
+      <div className="scroll-y h-full pe-1">
         <h1 className="m-0 mb-5 text-[40px] font-semibold tracking-tight text-fg">{t("vpnConnection")}</h1>
         <section className="surface-dark grid grid-cols-1 gap-5 rounded-[36px] bg-hero p-5 text-fg lg:grid-cols-2">
           <div className="p-4">
@@ -29,7 +29,7 @@ export function DashboardView() {
   return (
     <div
       className="scroll-y h-full"
-      style={{ paddingBottom: "calc(max(var(--safe-bottom, 0px), env(safe-area-inset-bottom, 0px)) + 108px)" }}
+      style={{ paddingBottom: "calc(max(var(--safe-bottom, 0px), env(safe-area-inset-bottom, 0px)) + 96px)" }}
     >
       <section className="surface-dark rounded-b-[40px] bg-hero px-5 pb-5 pt-4 text-fg">
         <div className="mb-6 flex items-center justify-between">
