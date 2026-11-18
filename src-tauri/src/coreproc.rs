@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -7,8 +8,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -31,7 +35,7 @@ pub struct Stats {
     pub tx_bps: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Tracker {
     stats: Stats,
     last_up_total: Option<u64>,
@@ -39,18 +43,8 @@ struct Tracker {
     last_at: Option<Instant>,
 }
 
-impl Default for Tracker {
-    fn default() -> Self {
-        Tracker {
-            stats: Stats::default(),
-            last_up_total: None,
-            last_down_total: None,
-            last_at: None,
-        }
-    }
-}
-
 enum RuntimeBackend {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     External {
         child: Child,
         stdin: Option<ChildStdin>,
@@ -175,6 +169,7 @@ pub fn parse_stats_line(line: &str) -> Option<(u64, u64)> {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn classify(line: &str) -> LogLevel {
     let lowered = line.to_ascii_lowercase();
     if lowered.contains("error") || lowered.contains("fatal") || lowered.contains("panic") {
@@ -188,6 +183,7 @@ fn classify(line: &str) -> LogLevel {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn pump<R>(reader: R, tracker: Arc<Mutex<Tracker>>, sink: LogSink)
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -276,6 +272,9 @@ fn add_traffic(tracker: &Arc<Mutex<Tracker>>, rx_bytes: u64, tx_bytes: u64) {
         let prev_tx = guard.stats.tx_bps;
         guard.stats.rx_bps = ((prev_rx as f64 * 0.55) + (rx_bytes as f64 * 2.2)) as u64;
         guard.stats.tx_bps = ((prev_tx as f64 * 0.55) + (tx_bytes as f64 * 2.2)) as u64;
+        guard.last_down_total = Some(guard.last_down_total.unwrap_or(0).saturating_add(rx_bytes));
+        guard.last_up_total = Some(guard.last_up_total.unwrap_or(0).saturating_add(tx_bytes));
+        guard.last_at = Some(Instant::now());
     }
 }
 
@@ -441,7 +440,7 @@ async fn spawn_embedded(args: &[String], tracker: Arc<Mutex<Tracker>>, sink: Log
         }));
     }
 
-    sink(LogLevel::Ok, format!("aether embedded engine listening on {}", cfg.bind));
+    sink(LogLevel::Ok, format!("aether engine initialized on {}", cfg.bind));
     Ok(CoreProcess {
         backend: RuntimeBackend::Embedded { exited, tasks },
         tracker,
@@ -494,12 +493,17 @@ impl CoreProcess {
         spawn_embedded(args, tracker, sink).await
     }
 
+    pub fn is_embedded(&self) -> bool {
+        matches!(self.backend, RuntimeBackend::Embedded { .. })
+    }
+
     pub fn stats(&self) -> Stats {
         self.tracker.lock().map(|guard| guard.stats).unwrap_or_default()
     }
 
     pub fn has_exited(&mut self) -> bool {
         match &mut self.backend {
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             RuntimeBackend::External { child, .. } => matches!(child.try_wait(), Ok(Some(_))),
             RuntimeBackend::Embedded { exited, .. } => exited.load(Ordering::SeqCst),
         }
@@ -507,6 +511,7 @@ impl CoreProcess {
 
     pub async fn terminate(&mut self) {
         match &mut self.backend {
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             RuntimeBackend::External { child, stdin, pid } => {
                 if let Some(mut input) = stdin.take() {
                     let _ = input.write_all(b"quit\n").await;

@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $env:RUSTFLAGS = "-A warnings"
+$env:NPM_CONFIG_LOGLEVEL = "error"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
@@ -120,7 +121,7 @@ function Ensure-Core {
 }
 
 if (-not (Test-Path "node_modules")) {
-    Invoke-Checked { npm install --no-audit --no-fund }
+    Invoke-Checked { npm install --no-audit --no-fund --silent }
 }
 
 Ensure-Icon
@@ -173,20 +174,18 @@ New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
 
 [System.IO.File]::WriteAllText((Join-Path $artifacts "radsho-public-key.asc"), "$publicKey`n", (New-Object System.Text.UTF8Encoding($false)))
 
-foreach ($target in $Targets) {
+foreach ($target in$Targets) {
     Invoke-Checked { rustup target add $target }
-    Invoke-Checked { npx tauri build --target $target --bundles $Bundles --config $overlay }
+    Invoke-Checked { npx tauri build --target $target --bundles $Bundles --config$overlay }
 
     $archLabel = if ($target -match "aarch64") { "arm64" } elseif ($target -match "i686") { "32" } else { "64" }
-    $relDir = Join-Path $root "target\$target\release"
+    $relDir = Join-Path$root "target\$target\release"
 
-    $nsisDir = Join-Path $relDir "bundle\nsis"
+    $nsisDir = Join-Path$relDir "bundle\nsis"
     if (Test-Path $nsisDir) {
-        $exe = Get-ChildItem -Path $nsisDir -Filter "*.exe" | Select-Object -First 1
-        if ($exe) {
-            $destExe = Join-Path $artifacts "Radsho-windows-$archLabel-setup.exe"
-            Copy-Item $exe.FullName -Destination $destExe -Force
-            $sig = "$($exe.FullName).sig"
+        $exe = Get-ChildItem -Path$nsisDir -Filter "*.exe" | Select-Object -First 1
+        if ($exe) {$destExe = Join-Path $artifacts "Radsho-windows-$archLabel-setup.exe"
+            Copy-Item $exe.FullName -Destination $destExe -Force$sig = "$($exe.FullName).sig"
             if (Test-Path $sig) {
                 Copy-Item $sig -Destination "$destExe.sig" -Force
             } else {
@@ -195,13 +194,11 @@ foreach ($target in $Targets) {
         }
     }
 
-    $msiDir = Join-Path $relDir "bundle\msi"
+    $msiDir = Join-Path$relDir "bundle\msi"
     if (Test-Path $msiDir) {
-        $msi = Get-ChildItem -Path $msiDir -Filter "*.msi" | Select-Object -First 1
-        if ($msi) {
-            $destMsi = Join-Path $artifacts "Radsho-windows-$archLabel.msi"
-            Copy-Item $msi.FullName -Destination $destMsi -Force
-            $sig = "$($msi.FullName).sig"
+        $msi = Get-ChildItem -Path$msiDir -Filter "*.msi" | Select-Object -First 1
+        if ($msi) {$destMsi = Join-Path $artifacts "Radsho-windows-$archLabel.msi"
+            Copy-Item $msi.FullName -Destination $destMsi -Force$sig = "$($msi.FullName).sig"
             if (Test-Path $sig) {
                 Copy-Item $sig -Destination "$destMsi.sig" -Force
             } else {
@@ -210,22 +207,21 @@ foreach ($target in $Targets) {
         }
     }
 
-    $mainExe = Join-Path $relDir "radsho.exe"
-    if (Test-Path $mainExe) {
-        $portableStage = Join-Path $root "target\portable-stage-$archLabel"
-        if (Test-Path $portableStage) { Remove-Item $portableStage -Recurse -Force }
+    $mainExe = Join-Path$relDir "radsho.exe"
+    if (Test-Path $mainExe) {$portableStage = Join-Path $root "target\portable-stage-$archLabel"
+        if (Test-Path $portableStage) { Remove-Item$portableStage -Recurse -Force }
         New-Item -ItemType Directory -Force -Path (Join-Path $portableStage "core") | Out-Null
-        Copy-Item $mainExe -Destination (Join-Path $portableStage "radsho.exe") -Force
+        Copy-Item $mainExe -Destination (Join-Path$portableStage "radsho.exe") -Force
         Copy-Item (Join-Path $root "src-tauri\core\*") -Destination (Join-Path $portableStage "core") -Recurse -Force
 
         $zipPortable = Join-Path $artifacts "Radsho-windows-$archLabel.zip"
         $zipDesktop = Join-Path $artifacts "Radsho-windows-$archLabel-desktop.zip"
         Compress-Archive -Path "$portableStage\*" -DestinationPath $zipPortable -Force
-        Copy-Item $zipPortable -Destination $zipDesktop -Force
+        Copy-Item $zipPortable -Destination$zipDesktop -Force
         Write-SigFile $zipPortable
         Write-SigFile $zipDesktop
         Remove-Item $portableStage -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
-Write-Host "Radsho v$version artifacts by WitWizard (Lilmmd & LFnighTT) are ready in $artifacts"
+Write-Host "Radsho v$version artifacts by WitWizard (Lilmmd & LFnighTT) are ready in$artifacts"

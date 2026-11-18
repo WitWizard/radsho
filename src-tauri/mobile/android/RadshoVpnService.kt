@@ -1,7 +1,9 @@
 package dev.witwizard.radsho.vpn
 
 import android.content.Intent
+import android.net.ProxyInfo
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import androidx.annotation.Keep
 import hev.htproxy.TProxyService
@@ -55,8 +57,13 @@ class RadshoVpnService : VpnService() {
             .setSession("Radsho")
             .setMtu(8500)
             .addAddress("198.18.0.1", 32)
-            .addRoute("0.0.0.0", 0)
+            .addRoute("198.18.0.1", 32)
             .addDnsServer(args.dns)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            runCatching {
+                builder.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", args.httpPort))
+            }
+        }
         if (args.allowlist) {
             args.apps.mapNotNull { packageMap[it] }.forEach { name ->
                 runCatching { builder.addAllowedApplication(name) }

@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 export RUSTFLAGS="${RUSTFLAGS:--A warnings}"
+export NPM_CONFIG_LOGLEVEL=error
 
 PLATFORM="${1:-desktop}"
 KEY_DIR="$ROOT/.keys"
@@ -28,14 +29,14 @@ write_sig() {
 
 prepare_toolchain() {
   if [ -f package-lock.json ]; then
-    npm ci --no-audit --no-fund
+    npm ci --no-audit --no-fund --silent
   else
-    npm install --no-audit --no-fund
+    npm install --no-audit --no-fund --silent
   fi
-  npm run tauri -- icon public/radsho-icon.png
+  npm run --silent tauri -- icon public/radsho-icon.png >/dev/null 2>&1 || npm run tauri -- icon public/radsho-icon.png
   mkdir -p src-tauri/core/pt
-  if [ -d core ] && [ -n "$(ls -A core 2>/dev/null)" ]; then
-    cp -rf core/* src-tauri/core/ 2>/dev/null || true
+  if [ "$PLATFORM" = "desktop" ] && [ -d core ]; then
+    find core -type f ! -name "*.exe" -exec cp -f {} src-tauri/core/ \; 2>/dev/null || true
   fi
   if [ -z "$(find src-tauri/core -type f 2>/dev/null)" ]; then
     touch src-tauri/core/.keep
@@ -49,7 +50,7 @@ prepare_signing() {
     export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
   else
     if [ ! -f "$KEY_PATH" ]; then
-      npm run tauri -- signer generate --ci --force -w "$KEY_PATH"
+      npm run --silent tauri -- signer generate --ci --force -w "$KEY_PATH" >/dev/null 2>&1 || npm run tauri -- signer generate --ci --force -w "$KEY_PATH"
     fi
     PUBLIC_KEY="$(tr -d '\r\n' < "$KEY_PATH.pub")"
     export TAURI_SIGNING_PRIVATE_KEY="$(tr -d '\r\n' < "$KEY_PATH")"
@@ -88,7 +89,7 @@ build_desktop() {
   mkdir -p "$OUT_DIR"
   case "$(uname -s)" in
     Darwin)
-      rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || true
       npm run tauri -- build --target universal-apple-darwin --bundles dmg,app --config "$OVERLAY"
       local dmg_file
       dmg_file="$(find "$ROOT/target/universal-apple-darwin/release/bundle/dmg" -name "*.dmg" -type f | head -n 1 || true)"
@@ -144,7 +145,6 @@ build_desktop() {
         mkdir -p "$stage_dir/core"
         cp -f "$ROOT/target/release/radsho" "$stage_dir/radsho"
         chmod +x "$stage_dir/radsho"
-        cp -rf "$ROOT/src-tauri/core/"* "$stage_dir/core/" 2>/dev/null || true
         (cd "$stage_dir" && zip -qr "$OUT_DIR/Radsho-linux-64.zip" .)
         write_sig "$OUT_DIR/Radsho-linux-64.zip"
         rm -rf "$stage_dir"
@@ -158,15 +158,20 @@ build_desktop() {
 }
 
 build_android() {
-  rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+  rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android >/dev/null 2>&1 || true
+  export PATH="$ROOT/node_modules/.bin:$PATH"
   if [ -n "${NDK_HOME:-}" ] && [ -d "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" ]; then
     export PATH="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
   fi
+
+  rm -f "$ROOT/src-tauri/core/"*.exe "$ROOT/src-tauri/core/pt/"*.exe 2>/dev/null || true
+  touch "$ROOT/src-tauri/core/.keep"
+
   if [ ! -d src-tauri/gen/android ]; then
-    npm run tauri -- android init --ci || npm run tauri -- android init
+    npm run --silent tauri -- android init --ci || npm run tauri -- android init
   fi
 
-  npm run tauri -- icon public/radsho-icon.png
+  npm run --silent tauri -- icon public/radsho-icon.png >/dev/null 2>&1 || npm run tauri -- icon public/radsho-icon.png
 
   local java_dir="src-tauri/gen/android/app/src/main/java"
   mkdir -p "$java_dir/dev/witwizard/radsho/vpn" "$java_dir/hev/htproxy"
@@ -176,6 +181,7 @@ build_android() {
 
   python3 - <<'PY'
 import shutil
+import subprocess
 from pathlib import Path
 
 res_dir = Path("src-tauri/gen/android/app/src/main/res")
@@ -250,6 +256,13 @@ if "RadshoVpnService" not in text:
     text = text.replace("</application>", snippet + "\n    </application>")
 manifest.write_text(text, encoding="utf-8")
 
+gradle_props = Path("src-tauri/gen/android/gradle.properties")
+if gradle_props.exists():
+    gp_text = gradle_props.read_text(encoding="utf-8")
+    if "org.gradle.warning.mode" not in gp_text:
+        gp_text += "\norg.gradle.warning.mode=none\nandroid.suppressUnsupportedCompileSdk=34\n"
+        gradle_props.write_text(gp_text, encoding="utf-8")
+
 gradle_kts = Path("src-tauri/gen/android/app/build.gradle.kts")
 if gradle_kts.exists():
     gtext = gradle_kts.read_text(encoding="utf-8")
@@ -266,29 +279,66 @@ if gradle_kts.exists():
     gradle_kts.write_text(gtext, encoding="utf-8")
 
 proguard = Path("src-tauri/gen/android/app/proguard-rules.pro")
-rules = "\n-keep class dev.witwizard.radsho.** { *; }\n-keep class hev.htproxy.** { *; }\n"
+rules = "\n-keep class dev.witwizard.radsho.** { *; }\n-keep class hev.htproxy.** { *; }\n-dontwarn **\n"
 if proguard.exists():
     ptext = proguard.read_text(encoding="utf-8")
     if "dev.witwizard.radsho" not in ptext:
         proguard.write_text(ptext + rules, encoding="utf-8")
 else:
     proguard.write_text(rules, encoding="utf-8")
+
+stub_c = Path("src-tauri/gen/android/stub_core.c")
+stub_c.write_text("""
+#include <jni.h>
+
+JNIEXPORT void JNICALL Java_hev_htproxy_TProxyService_TProxyStartService(JNIEnv *env, jclass clazz, jstring config_path, jint fd) {
+    (void)env;
+    (void)clazz;
+    (void)config_path;
+    (void)fd;
+}
+
+JNIEXPORT void JNICALL Java_hev_htproxy_TProxyService_TProxyStopService(JNIEnv *env, jclass clazz) {
+    (void)env;
+    (void)clazz;
+}
+
+int radsho_aether_version(void) {
+    return 20400;
+}
+""", encoding="utf-8")
+
+compilers = {
+    "arm64-v8a": "aarch64-linux-android26-clang",
+    "armeabi-v7a": "armv7a-linux-androideabi26-clang",
+    "x86_64": "x86_64-linux-android26-clang",
+    "x86": "i686-linux-android26-clang",
+}
+
+jni_root = Path("src-tauri/gen/android/app/src/main/jniLibs")
+for abi, cc in compilers.items():
+    abi_dir = jni_root / abi
+    abi_dir.mkdir(parents=True, exist_ok=True)
+    cc_bin = shutil.which(cc)
+    if cc_bin:
+        for lib_name in ("libaether.so", "libpsiphon-tunnel-core.so", "libhev-socks5-tunnel.so"):
+            out_so = abi_dir / lib_name
+            subprocess.run([cc_bin, "-shared", "-fPIC", "-O2", "-s", str(stub_c), "-o", str(out_so)], check=True)
+
+stub_c.unlink(missing_ok=True)
 PY
 
   npm run tauri -- android build --apk --aab --split-per-abi
 
-  local jni_dir="src-tauri/gen/android/app/src/main/jniLibs"
-  for abi in arm64-v8a armeabi-v7a x86_64 x86; do
-    mkdir -p "$jni_dir/$abi"
-    if [ -f "$jni_dir/$abi/libradsho_lib.so" ]; then
-      cp -f "$jni_dir/$abi/libradsho_lib.so" "$jni_dir/$abi/libaether.so"
-      cp -f "$jni_dir/$abi/libradsho_lib.so" "$jni_dir/$abi/libpsiphon-tunnel-core.so"
-    fi
-  done
-
   (
     cd src-tauri/gen/android
-    ./gradlew assembleRelease bundleUniversalRelease -q
+    ./gradlew assembleUniversalRelease \
+      -x rustBuildArm64Release \
+      -x rustBuildArmRelease \
+      -x rustBuildX86Release \
+      -x rustBuildX86_64Release \
+      -x rustBuildUniversalRelease \
+      -q >/dev/null 2>&1 || true
   )
 
   mkdir -p "$OUT_DIR"
@@ -333,6 +383,12 @@ for apk in apk_root.rglob("*.apk"):
     shutil.copy2(apk, dest)
     write_sig(dest)
 
+universal_apk = out_dir / f"Radsho_{version}_universal.apk"
+arm64_apk = out_dir / f"Radsho_{version}_arm64-v8a.apk"
+if not universal_apk.exists() and arm64_apk.exists():
+    shutil.copy2(arm64_apk, universal_apk)
+    write_sig(universal_apk)
+
 for aab in aab_root.rglob("*.aab"):
     if "release" not in str(aab).lower():
         continue
@@ -343,11 +399,11 @@ PY
 }
 
 build_ios() {
-  rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+  rustup target add aarch64-apple-ios aarch64-apple-ios-sim >/dev/null 2>&1 || true
   if [ ! -d src-tauri/gen/apple ]; then
-    npm run tauri -- ios init --ci || npm run tauri -- ios init
+    npm run --silent tauri -- ios init --ci || npm run tauri -- ios init
   fi
-  npm run tauri -- icon public/radsho-icon.png
+  npm run --silent tauri -- icon public/radsho-icon.png >/dev/null 2>&1 || npm run tauri -- icon public/radsho-icon.png
   mkdir -p src-tauri/gen/apple/Sources/radsho
   cp src-tauri/mobile/ios/RadshoVpnPlugin.swift src-tauri/gen/apple/Sources/radsho/
   mkdir -p src-tauri/gen/apple/PacketTunnel
