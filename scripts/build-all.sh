@@ -5,6 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 export RUSTFLAGS="${RUSTFLAGS:--A warnings}"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-A warnings"
+export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_RUSTFLAGS="-A warnings"
+export CARGO_TARGET_I686_LINUX_ANDROID_RUSTFLAGS="-A warnings"
+export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="-A warnings"
 export NPM_CONFIG_LOGLEVEL=error
 
 PLATFORM="${1:-desktop}"
@@ -338,19 +342,31 @@ manifest.write_text(text, encoding="utf-8")
 
 gradle_props = Path("src-tauri/gen/android/gradle.properties")
 if gradle_props.exists():
-    gp_text = gradle_props.read_text(encoding="utf-8")
-    if "org.gradle.warning.mode" not in gp_text:
-        gp_text += "\norg.gradle.warning.mode=none\norg.gradle.logging.level=quiet\nandroid.suppressUnsupportedCompileSdk=34,35,36\n"
-        gradle_props.write_text(gp_text, encoding="utf-8")
+    gp_lines = [
+        line for line in gradle_props.read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith(("org.gradle.warning.mode=", "org.gradle.logging.level=", "android.suppressUnsupportedCompileSdk="))
+    ]
+    gp_lines.extend([
+        "org.gradle.warning.mode=none",
+        "org.gradle.logging.level=quiet",
+        "android.suppressUnsupportedCompileSdk=34,35,36",
+    ])
+    gradle_props.write_text("\n".join(gp_lines) + "\n", encoding="utf-8")
 
 ndk_home = os.environ.get("NDK_HOME", "")
 ndk_ver = Path(ndk_home).name if ndk_home else "27.0.12077973"
 
+for kts_file in Path("src-tauri/gen/android").rglob("*.gradle*"):
+    if kts_file.is_file():
+        ktext = kts_file.read_text(encoding="utf-8")
+        new_ktext = re.sub(r"compileSdk\s*=\s*\d+", "compileSdk = 34", ktext)
+        new_ktext = re.sub(r"targetSdk\s*=\s*\d+", "targetSdk = 34", new_ktext)
+        if new_ktext != ktext:
+            kts_file.write_text(new_ktext, encoding="utf-8")
+
 gradle_kts = Path("src-tauri/gen/android/app/build.gradle.kts")
 if gradle_kts.exists():
     gtext = gradle_kts.read_text(encoding="utf-8")
-    gtext = re.sub(r"compileSdk\s*=\s*\d+", "compileSdk = 34", gtext)
-    gtext = re.sub(r"targetSdk\s*=\s*\d+", "targetSdk = 34", gtext)
     if 'signingConfigs.getByName("debug")' not in gtext:
         gtext = gtext.replace(
             'getByName("release") {',

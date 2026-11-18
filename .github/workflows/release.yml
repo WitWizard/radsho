@@ -77,7 +77,7 @@ jobs:
   build-android:
     runs-on: ubuntu-22.04
     env:
-      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.logging.level=quiet -Dorg.gradle.warning.mode=none"
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.logging.level=quiet -Dorg.gradle.warning.mode=none -Dandroid.suppressUnsupportedCompileSdk=34,35,36"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
