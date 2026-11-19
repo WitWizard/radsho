@@ -27,7 +27,7 @@ import sys
 
 ansi = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 allowed = re.compile(r"^\s*(vite\s+v|✓|dist/|Compiling\s+|Finished\s+|error(\[|:)|Error(\[|:|\s))")
-tail = deque(maxlen=80)
+tail = deque(maxlen=150)
 
 proc = subprocess.Popen(
     sys.argv[1:],
@@ -203,6 +203,18 @@ build_android() {
     export PATH="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
   fi
 
+  local sdk_root="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+  if [ -d "$sdk_root" ] && [ ! -d "$sdk_root/platforms/android-36" ]; then
+    local sdkmanager="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+    if [ ! -x "$sdkmanager" ]; then
+      sdkmanager="$(find "$sdk_root" -name sdkmanager -type f 2>/dev/null | head -n 1 || true)"
+    fi
+    if [ -n "$sdkmanager" ] && [ -x "$sdkmanager" ]; then
+      python3 -c 'import subprocess, sys; subprocess.run([sys.argv[1], "--licenses"], input=b"y\n" * 200, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' "$sdkmanager" || true
+      "$sdkmanager" --install "platforms;android-36" "build-tools;36.0.0" >/dev/null 2>&1 || true
+    fi
+  fi
+
   rm -f "$ROOT/src-tauri/core/"*.exe "$ROOT/src-tauri/core/pt/"*.exe 2>/dev/null || true
   touch "$ROOT/src-tauri/core/.keep"
 
@@ -342,31 +354,35 @@ manifest.write_text(text, encoding="utf-8")
 
 gradle_props = Path("src-tauri/gen/android/gradle.properties")
 if gradle_props.exists():
+    managed_prefixes = (
+        "org.gradle.warning.mode=",
+        "org.gradle.logging.level=",
+        "android.suppressUnsupportedCompileSdk=",
+        "android.sync.suppressAgpWarnings=",
+    )
     gp_lines = [
         line for line in gradle_props.read_text(encoding="utf-8").splitlines()
-        if not line.strip().startswith(("org.gradle.warning.mode=", "org.gradle.logging.level=", "android.suppressUnsupportedCompileSdk="))
+        if not line.strip().startswith(managed_prefixes)
     ]
     gp_lines.extend([
         "org.gradle.warning.mode=none",
         "org.gradle.logging.level=quiet",
-        "android.suppressUnsupportedCompileSdk=34,35,36",
+        "android.suppressUnsupportedCompileSdk=35,36,37",
+        "android.sync.suppressAgpWarnings=DEPRECATED_DSL,UNSUPPORTED_PROJECT_OPTION_USE",
     ])
     gradle_props.write_text("\n".join(gp_lines) + "\n", encoding="utf-8")
 
 ndk_home = os.environ.get("NDK_HOME", "")
 ndk_ver = Path(ndk_home).name if ndk_home else "27.0.12077973"
 
-for kts_file in Path("src-tauri/gen/android").rglob("*.gradle*"):
-    if kts_file.is_file():
-        ktext = kts_file.read_text(encoding="utf-8")
-        new_ktext = re.sub(r"compileSdk\s*=\s*\d+", "compileSdk = 34", ktext)
-        new_ktext = re.sub(r"targetSdk\s*=\s*\d+", "targetSdk = 34", new_ktext)
-        if new_ktext != ktext:
-            kts_file.write_text(new_ktext, encoding="utf-8")
+def ensure_min_compile_sdk(match: re.Match) -> str:
+    current = int(match.group(1))
+    return f"compileSdk = {max(current, 36)}"
 
 gradle_kts = Path("src-tauri/gen/android/app/build.gradle.kts")
 if gradle_kts.exists():
     gtext = gradle_kts.read_text(encoding="utf-8")
+    gtext = re.sub(r"compileSdk\s*=\s*(\d+)", ensure_min_compile_sdk, gtext)
     if 'signingConfigs.getByName("debug")' not in gtext:
         gtext = gtext.replace(
             'getByName("release") {',
